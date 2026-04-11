@@ -1,6 +1,45 @@
 import Cocoa
 import CoreGraphics
 
+// MARK: - Diagnostic file logger
+
+fileprivate enum DiagLog {
+    static let path = "/tmp/grindow-diag.log"
+    private static var lastEventTime: CFAbsoluteTime = 0
+    private static let queue = DispatchQueue(label: "grindow.diag")
+    private static var handle: FileHandle?
+
+    static func reset() {
+        queue.sync {
+            FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
+            handle = FileHandle(forWritingAtPath: path)
+            lastEventTime = 0
+        }
+        log("=== DIAG LOG RESET ===")
+    }
+
+    static func log(_ message: String) {
+        queue.async {
+            let now = CFAbsoluteTimeGetCurrent()
+            if lastEventTime > 0 && (now - lastEventTime) > 0.2 {
+                writeLine("--- GAP (\(String(format: "%.2f", now - lastEventTime))s) ---")
+            }
+            lastEventTime = now
+            let ts = String(format: "%.3f", now.truncatingRemainder(dividingBy: 10000))
+            writeLine("[\(ts)] \(message)")
+        }
+    }
+
+    private static func writeLine(_ line: String) {
+        if handle == nil {
+            handle = FileHandle(forWritingAtPath: path)
+        }
+        if let data = (line + "\n").data(using: .utf8) {
+            handle?.write(data)
+        }
+    }
+}
+
 /// Intercepts three-finger trackpad swipe gestures using CGEventTap.
 ///
 /// This class creates a system-level event tap that captures gesture events
@@ -18,7 +57,7 @@ class GestureInterceptor: ObservableObject {
     /// Called when a vertical swipe is detected. The parameter is the direction.
     var onSwipe: ((SwipeDirection) -> Void)?
 
-    private var eventTap: CFMachPort?
+    fileprivate var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
     // Gesture tracking state
@@ -39,12 +78,26 @@ class GestureInterceptor: ObservableObject {
         case completed
     }
 
+    // Diagnostic mode — tracks per-gesture peaks across all fields 108-140
+    // so we can identify which field(s) encode direction.
+    static var diagnosticsEnabled: Bool = true
+    private var diagEventCounter: Int = 0
+    private var diagGestureActive = false
+    private var diagFieldMinMax: [Int: (min: Double, max: Double, samples: Int)] = [:]
+    private var diagGestureStartTime: CFAbsoluteTime = 0
+
     private init() {}
 
     // MARK: - Start / Stop
 
     func start() {
-        guard eventTap == nil else { return }
+        guard eventTap == nil else {
+            DiagLog.log("start() called but eventTap already exists")
+            return
+        }
+
+        DiagLog.reset()
+        DiagLog.log("start() called. AXIsProcessTrusted=\(AXIsProcessTrusted())")
 
         // We need to intercept gesture events (type 29) and possibly scroll events.
         // NSEvent.EventType.gesture = 29
@@ -58,6 +111,8 @@ class GestureInterceptor: ObservableObject {
             (1 << CGEventType.scrollWheel.rawValue)
         )
 
+        DiagLog.log("eventMask=\(String(eventMask, radix: 2))")
+
         // Create the event tap
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -67,20 +122,25 @@ class GestureInterceptor: ObservableObject {
             callback: gestureEventCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("Grindow: Failed to create event tap. Ensure Accessibility permissions are granted.")
+            DiagLog.log("FAIL CGEvent.tapCreate returned nil")
             return
         }
+
+        DiagLog.log("OK tapCreate succeeded")
 
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 
         if let source = runLoopSource {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            DiagLog.log("Added runloop source")
+        } else {
+            DiagLog.log("FAIL runloop source nil")
         }
 
         CGEvent.tapEnable(tap: tap, enable: true)
         isActive = true
-        print("Grindow: Gesture interceptor started")
+        DiagLog.log("Interceptor active — ready for swipe")
     }
 
     func stop() {
@@ -111,6 +171,53 @@ class GestureInterceptor: ObservableObject {
     /// Processes a CGEvent and returns nil to suppress it or the event to pass through.
     func processEvent(_ event: CGEvent) -> CGEvent? {
         let eventType = event.type
+
+        if GestureInterceptor.diagnosticsEnabled {
+            let t = eventType.rawValue
+            if t == 29 {
+                let subtype = event.getDoubleValueField(CGEventField(rawValue: 110)!)
+                let phase = event.getDoubleValueField(CGEventField(rawValue: 132)!)
+
+                if subtype != 0 && phase == 1 {
+                    // BEGAN — reset tracking
+                    diagGestureActive = true
+                    diagFieldMinMax.removeAll()
+                    diagGestureStartTime = CFAbsoluteTimeGetCurrent()
+                    DiagLog.log("=== GESTURE BEGIN sub=\(Int(subtype)) ===")
+                }
+
+                if diagGestureActive && subtype != 0 {
+                    // Sample all fields 108-140 and track min/max/sample count
+                    for fid in 108...140 {
+                        let field = CGEventField(rawValue: UInt32(fid))!
+                        let v = event.getDoubleValueField(field)
+                        if var entry = diagFieldMinMax[fid] {
+                            entry.min = Swift.min(entry.min, v)
+                            entry.max = Swift.max(entry.max, v)
+                            entry.samples += 1
+                            diagFieldMinMax[fid] = entry
+                        } else {
+                            diagFieldMinMax[fid] = (min: v, max: v, samples: 1)
+                        }
+                    }
+                }
+
+                if diagGestureActive && phase == 4 {
+                    // ENDED — dump summary
+                    let duration = CFAbsoluteTimeGetCurrent() - diagGestureStartTime
+                    DiagLog.log("=== GESTURE END sub=\(Int(subtype)) duration=\(String(format: "%.2f", duration))s ===")
+                    let sortedFields = diagFieldMinMax.sorted { $0.key < $1.key }
+                    for (fid, entry) in sortedFields {
+                        // Only log fields that actually varied or had non-zero values
+                        if entry.min != 0 || entry.max != 0 {
+                            DiagLog.log("  f\(fid): min=\(String(format: "%.4f", entry.min)) max=\(String(format: "%.4f", entry.max)) n=\(entry.samples)")
+                        }
+                    }
+                    diagGestureActive = false
+                    diagFieldMinMax.removeAll()
+                }
+            }
+        }
 
         // Handle swipe events (type 31) — these are discrete swipe notifications
         if eventType.rawValue == 31 {
@@ -158,7 +265,7 @@ class GestureInterceptor: ObservableObject {
         // CGEvent field 132 = gesture phase (began=1, changed=2, ended=4)
         // CGEvent field 135 = touch count
 
-        let subtype = event.getIntegerValueField(CGEventField(rawValue: 110)!)
+        _ = event.getIntegerValueField(CGEventField(rawValue: 110)!) // subtype (reserved for future use)
         let phase = event.getIntegerValueField(CGEventField(rawValue: 132)!)
         let touches = event.getIntegerValueField(CGEventField(rawValue: 135)!)
 
@@ -232,36 +339,10 @@ class GestureInterceptor: ObservableObject {
     }
 
     private func handleScrollEvent(_ event: CGEvent) -> CGEvent? {
-        // Three-finger swipes can also come through as momentum scroll events.
-        // We check for the gesture scroll variant (non-pixel-aligned, phase-based).
-
-        let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
-        let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
-
-        // Only intercept gesture-phase scrolls (not momentum), and only
-        // if we're actively tracking a three-finger gesture
-        if momentumPhase != 0 || phase == 0 {
-            return event  // Regular scroll or momentum — pass through
-        }
-
-        // Check if this is a three-finger scroll by examining the point data count
-        let pointCount = event.getIntegerValueField(.scrollWheelEventPointDataCount)
-        guard pointCount == 3 else {
-            return event
-        }
-
-        let dy = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-        let dx = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
-
-        // If primarily vertical, suppress and track
-        if abs(dy) > abs(dx) * Double(directionLockRatio) && abs(dy) > 0.5 {
-            let direction: SwipeDirection = dy > 0 ? .up : .down
-            DispatchQueue.main.async { [weak self] in
-                self?.onSwipe?(direction)
-            }
-            return nil
-        }
-
+        // Scroll-wheel fallback is intentionally a pass-through: CoreGraphics does
+        // not expose a public finger-count field on scroll events, so we cannot
+        // reliably distinguish two-finger scrolls from three-finger swipes here.
+        // Three-finger gesture detection happens in handleGestureEvent (type 29).
         return event
     }
 }

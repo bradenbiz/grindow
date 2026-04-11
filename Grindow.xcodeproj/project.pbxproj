@@ -7,18 +7,18 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000010000000000000001 /* GrindowApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000010000000000000001; };
-		A10000020000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000020000000000000002; };
-		A10000030000000000000003 /* SpaceGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000030000000000000003; };
-		A10000040000000000000004 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000040000000000000004; };
-		A10000050000000000000005 /* GestureInterceptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000050000000000000005; };
-		A10000060000000000000006 /* SpaceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000060000000000000006; };
-		A10000070000000000000007 /* AccessibilityHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000070000000000000007; };
-		A10000080000000000000008 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000080000000000000008; };
-		A10000090000000000000009 /* GridConfigView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000090000000000000009; };
-		A1000010000000000000000A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000010000000000000000A; };
-		A1000011000000000000000B /* BounceOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000011000000000000000B; };
-		A1000012000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000012000000000000000C; };
+		A10000010000000000000001 /* GrindowApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000010000000000000001 /* GrindowApp.swift */; };
+		A10000020000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000020000000000000002 /* AppDelegate.swift */; };
+		A10000030000000000000003 /* SpaceGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000030000000000000003 /* SpaceGrid.swift */; };
+		A10000040000000000000004 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000040000000000000004 /* AppSettings.swift */; };
+		A10000050000000000000005 /* GestureInterceptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000050000000000000005 /* GestureInterceptor.swift */; };
+		A10000060000000000000006 /* SpaceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000060000000000000006 /* SpaceManager.swift */; };
+		A10000070000000000000007 /* AccessibilityHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000070000000000000007 /* AccessibilityHelper.swift */; };
+		A10000080000000000000008 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000080000000000000008 /* MenuBarView.swift */; };
+		A10000090000000000000009 /* GridConfigView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000090000000000000009 /* GridConfigView.swift */; };
+		A1000010000000000000000A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000010000000000000000A /* SettingsView.swift */; };
+		A1000011000000000000000B /* BounceOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000011000000000000000B /* BounceOverlayView.swift */; };
+		A1000012000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000012000000000000000C /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,7 +40,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A400000100000000000000010 /* Frameworks */ = {
+		A40000010000000000000001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -50,7 +50,7 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A5000001000000000000000F /* Root */ = {
+		A5000001000000000000000F = {
 			isa = PBXGroup;
 			children = (
 				A5000002000000000000000F /* Grindow */,
@@ -114,13 +114,13 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A600000100000000000000010 /* Grindow */ = {
+		A60000010000000000000001 /* Grindow */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A800000100000000000000010 /* Build configuration list for PBXNativeTarget "Grindow" */;
+			buildConfigurationList = A80000010000000000000001 /* Build configuration list for PBXNativeTarget "Grindow" */;
 			buildPhases = (
-				A700000100000000000000010 /* Sources */,
-				A400000100000000000000010 /* Frameworks */,
-				A700000200000000000000010 /* Resources */,
+				A70000010000000000000001 /* Sources */,
+				A40000010000000000000001 /* Frameworks */,
+				A70000020000000000000001 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -134,19 +134,19 @@
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		A900000100000000000000010 /* Project object */ = {
+		A90000010000000000000001 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1500;
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
-					A600000100000000000000010 = {
+					A60000010000000000000001 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
 			};
-			buildConfigurationList = A800000200000000000000010 /* Build configuration list for PBXProject "Grindow" */;
+			buildConfigurationList = A80000020000000000000001 /* Build configuration list for PBXProject "Grindow" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -154,18 +154,18 @@
 				en,
 				Base,
 			);
-			mainGroup = A5000001000000000000000F /* Root */;
+			mainGroup = A5000001000000000000000F;
 			productRefGroup = A5000006000000000000000F /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A600000100000000000000010 /* Grindow */,
+				A60000010000000000000001 /* Grindow */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A700000200000000000000010 /* Resources */ = {
+		A70000020000000000000001 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -176,7 +176,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A700000100000000000000010 /* Sources */ = {
+		A70000010000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -322,6 +322,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R3W3G57DY3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Grindow/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -346,6 +347,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R3W3G57DY3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Grindow/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -364,7 +366,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A800000100000000000000010 /* Build configuration list for PBXNativeTarget "Grindow" */ = {
+		A80000010000000000000001 /* Build configuration list for PBXNativeTarget "Grindow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				B10000030000000000000003 /* Debug */,
@@ -373,7 +375,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A800000200000000000000010 /* Build configuration list for PBXProject "Grindow" */ = {
+		A80000020000000000000001 /* Build configuration list for PBXProject "Grindow" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				B10000010000000000000001 /* Debug */,
@@ -383,7 +385,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
 	};
-	rootObject = A900000100000000000000010 /* Project object */;
+	rootObject = A90000010000000000000001 /* Project object */;
 }
