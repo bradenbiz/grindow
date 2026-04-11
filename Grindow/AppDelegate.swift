@@ -149,6 +149,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupGestureInterceptor() {
         gestureInterceptor.onSwipe = { [weak self] direction in
+            print("GRINDOW: onSwipe direction=\(direction)")
             self?.handleSwipe(direction: direction)
         }
 
