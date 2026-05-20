@@ -9,6 +9,8 @@ struct GridConfigView: View {
 
     @State private var draggedSpace: UInt64?
     @State private var hoveredCell: GridPosition?
+    @State private var renamingSpaceID: UInt64?
+    @State private var renameText: String = ""
 
     var body: some View {
         VStack(spacing: 16) {
@@ -19,6 +21,20 @@ struct GridConfigView: View {
         }
         .padding(20)
         .frame(minWidth: 500, minHeight: 400)
+        .alert(
+            "Rename Space",
+            isPresented: Binding(
+                get: { renamingSpaceID != nil },
+                set: { if !$0 { renamingSpaceID = nil } }
+            )
+        ) {
+            TextField("Name", text: $renameText)
+            Button("Save") { commitRename() }
+            Button("Cancel", role: .cancel) {
+                renamingSpaceID = nil
+                renameText = ""
+            }
+        }
     }
 
     // MARK: - Header
@@ -139,7 +155,33 @@ struct GridConfigView: View {
             }
             return NSItemProvider()
         }
+        .contextMenu {
+            if let id = spaceID {
+                Button("Rename…") { beginRename(spaceID: id) }
+                if settings.customName(forSpaceID: id) != nil {
+                    Button("Reset to Default Name") {
+                        settings.setCustomName(nil, forSpaceID: id)
+                        spaceManager.refreshSpaces()
+                    }
+                }
+            }
+        }
         .help(spaceInfo?.label ?? "Empty cell (\(row), \(col))")
+    }
+
+    private func beginRename(spaceID: UInt64) {
+        renameText = settings.customName(forSpaceID: spaceID)
+            ?? spaceManager.spaces.first(where: { $0.id == spaceID })?.label
+            ?? ""
+        renamingSpaceID = spaceID
+    }
+
+    private func commitRename() {
+        guard let id = renamingSpaceID else { return }
+        settings.setCustomName(renameText, forSpaceID: id)
+        renamingSpaceID = nil
+        renameText = ""
+        spaceManager.refreshSpaces()
     }
 
     private func cellBackgroundColor(isCurrentSpace: Bool, hasSpace: Bool, isHovered: Bool) -> Color {

@@ -88,12 +88,13 @@ class SpaceManager: ObservableObject {
                 guard typeRaw == 0 || typeRaw == 4 else { continue }
                 let type = SpaceInfo.SpaceType(rawValue: typeRaw) ?? .unknown
 
-                let label: String
+                let autoLabel: String
                 if type == .fullscreen {
-                    label = "Full Screen \(globalIndex + 1)"
+                    autoLabel = "Full Screen \(globalIndex + 1)"
                 } else {
-                    label = "Desktop \(globalIndex + 1)"
+                    autoLabel = "Desktop \(globalIndex + 1)"
                 }
+                let label = AppSettings.shared.customName(forSpaceID: spaceID) ?? autoLabel
 
                 let info = SpaceInfo(
                     id: spaceID,
