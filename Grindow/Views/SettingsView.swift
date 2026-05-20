@@ -26,6 +26,12 @@ struct SettingsView: View {
                     Toggle("Show bounce animation overlay", isOn: $settings.showBounceAnimation)
                         .padding(.leading, 20)
                 }
+
+                Toggle("Invert vertical swipe direction", isOn: $settings.invertVerticalSwipe)
+                Text("Flip if three-finger up moves you down (or vice versa).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
             }
 
             Divider()

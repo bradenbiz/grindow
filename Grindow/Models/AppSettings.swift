@@ -16,6 +16,7 @@ class AppSettings: ObservableObject {
         static let launchAtLogin = "launchAtLogin"
         static let showBounceAnimation = "showBounceAnimation"
         static let hasShownFirstRunGuide = "hasShownFirstRunGuide"
+        static let invertVerticalSwipe = "invertVerticalSwipe"
     }
 
     @Published var edgeBehavior: EdgeBehavior {
@@ -54,6 +55,10 @@ class AppSettings: ObservableObject {
         didSet { defaults.set(hasShownFirstRunGuide, forKey: Keys.hasShownFirstRunGuide) }
     }
 
+    @Published var invertVerticalSwipe: Bool {
+        didSet { defaults.set(invertVerticalSwipe, forKey: Keys.invertVerticalSwipe) }
+    }
+
     private init() {
         let edgeRaw = defaults.string(forKey: Keys.edgeBehavior) ?? EdgeBehavior.stop.rawValue
         self.edgeBehavior = EdgeBehavior(rawValue: edgeRaw) ?? .stop
@@ -63,6 +68,7 @@ class AppSettings: ObservableObject {
         self.launchAtLogin = defaults.object(forKey: Keys.launchAtLogin) as? Bool ?? false
         self.showBounceAnimation = defaults.object(forKey: Keys.showBounceAnimation) as? Bool ?? true
         self.hasShownFirstRunGuide = defaults.object(forKey: Keys.hasShownFirstRunGuide) as? Bool ?? false
+        self.invertVerticalSwipe = defaults.object(forKey: Keys.invertVerticalSwipe) as? Bool ?? false
 
         if let data = defaults.data(forKey: Keys.gridLayout),
            let layout = try? JSONDecoder().decode([UInt64].self, from: data) {
@@ -80,6 +86,7 @@ class AppSettings: ObservableObject {
         launchAtLogin = false
         showBounceAnimation = true
         hasShownFirstRunGuide = false
+        invertVerticalSwipe = false
         gridLayout = []
     }
 }

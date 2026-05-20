@@ -225,7 +225,12 @@ class GestureInterceptor: ObservableObject {
 
         // MT normalized coords: y=0 is near the user, y=1 is far.
         // Fingers moving away from the user → avgDY > 0 → swipe up.
-        let direction: SwipeDirection = avgDY > 0 ? .up : .down
+        // If `invertVerticalSwipe` is on, flip — useful when direction feels
+        // backwards on the user's hardware/macOS combination.
+        var direction: SwipeDirection = avgDY > 0 ? .up : .down
+        if AppSettings.shared.invertVerticalSwipe {
+            direction = (direction == .up) ? .down : .up
+        }
         swipeEmittedForCurrentGesture = true
         onSwipe?(direction)
     }
