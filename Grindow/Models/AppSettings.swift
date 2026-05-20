@@ -15,6 +15,7 @@ class AppSettings: ObservableObject {
         static let isEnabled = "isEnabled"
         static let launchAtLogin = "launchAtLogin"
         static let showBounceAnimation = "showBounceAnimation"
+        static let hasShownFirstRunGuide = "hasShownFirstRunGuide"
     }
 
     @Published var edgeBehavior: EdgeBehavior {
@@ -49,6 +50,10 @@ class AppSettings: ObservableObject {
         didSet { defaults.set(showBounceAnimation, forKey: Keys.showBounceAnimation) }
     }
 
+    @Published var hasShownFirstRunGuide: Bool {
+        didSet { defaults.set(hasShownFirstRunGuide, forKey: Keys.hasShownFirstRunGuide) }
+    }
+
     private init() {
         let edgeRaw = defaults.string(forKey: Keys.edgeBehavior) ?? EdgeBehavior.stop.rawValue
         self.edgeBehavior = EdgeBehavior(rawValue: edgeRaw) ?? .stop
@@ -57,6 +62,7 @@ class AppSettings: ObservableObject {
         self.isEnabled = defaults.object(forKey: Keys.isEnabled) as? Bool ?? true
         self.launchAtLogin = defaults.object(forKey: Keys.launchAtLogin) as? Bool ?? false
         self.showBounceAnimation = defaults.object(forKey: Keys.showBounceAnimation) as? Bool ?? true
+        self.hasShownFirstRunGuide = defaults.object(forKey: Keys.hasShownFirstRunGuide) as? Bool ?? false
 
         if let data = defaults.data(forKey: Keys.gridLayout),
            let layout = try? JSONDecoder().decode([UInt64].self, from: data) {
@@ -73,6 +79,7 @@ class AppSettings: ObservableObject {
         isEnabled = true
         launchAtLogin = false
         showBounceAnimation = true
+        hasShownFirstRunGuide = false
         gridLayout = []
     }
 }

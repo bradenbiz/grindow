@@ -34,6 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupGestureInterceptor()
         checkAccessibility()
         setupEventMonitor()
+        showFirstRunGuideIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -113,9 +114,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupSpaceGrid() {
         let spaceIDs = spaceManager.spaces.map { $0.id }
+        let currentSet = Set(spaceIDs)
 
-        // Restore saved layout or auto-arrange
-        if !settings.gridLayout.isEmpty {
+        // Discard a saved layout if any of its IDs no longer correspond to a
+        // real space — happens after our phantom-space filter kicks in, or
+        // when the user adds/removes desktops outside Grindow.
+        let savedNonZero = settings.gridLayout.filter { $0 != 0 }
+        let savedAllValid = !savedNonZero.isEmpty
+            && savedNonZero.allSatisfy { currentSet.contains($0) }
+
+        if savedAllValid {
             spaceGrid.arrange(
                 spaceIDs: settings.gridLayout,
                 rows: settings.gridRows,
@@ -127,6 +135,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 rows: settings.gridRows,
                 columns: settings.gridColumns
             )
+            settings.gridLayout = spaceIDs
         }
 
         // Set initial position
@@ -152,14 +161,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleSwipe(direction: direction)
         }
 
-        if settings.isEnabled && AccessibilityHelper.shared.isAccessibilityGranted {
+        // MultitouchSupport doesn't require Accessibility — only the
+        // keyboard-simulation path for space switching does. Start the
+        // interceptor unconditionally if the user has Grindow enabled.
+        if settings.isEnabled {
             gestureInterceptor.start()
         }
 
-        // Observe settings changes
         settings.$isEnabled.receive(on: DispatchQueue.main).sink { [weak self] enabled in
             guard let self = self else { return }
-            if enabled && AccessibilityHelper.shared.isAccessibilityGranted {
+            if enabled {
                 self.gestureInterceptor.start()
             } else {
                 self.gestureInterceptor.stop()
@@ -208,6 +219,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.gestureInterceptor.start()
                 }
             }
+        }
+    }
+
+    // MARK: - First-Run Guide
+
+    /// On first launch, prompt the user to disable macOS's built-in three-finger
+    /// gestures so Grindow's vertical-swipe handler isn't fighting Mission Control.
+    private func showFirstRunGuideIfNeeded() {
+        guard !settings.hasShownFirstRunGuide else { return }
+
+        // Defer so the menu bar item shows up first and the alert isn't presented
+        // before the rest of the UI is ready.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self = self else { return }
+
+            let alert = NSAlert()
+            alert.messageText = "One quick setup step"
+            alert.informativeText = """
+            Grindow uses three-finger vertical swipes to navigate your space grid. \
+            macOS uses the same gesture for Mission Control and App Exposé by default, \
+            so they will fight each other until you turn the built-in versions off.
+
+            In System Settings → Trackpad → More Gestures, set both \
+            "Swipe between full-screen apps" and "Mission Control" to "Off" \
+            (or switch them to four fingers).
+
+            Horizontal three-finger swipes will keep working as normal.
+            """
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Open Trackpad Settings")
+            alert.addButton(withTitle: "Later")
+
+            NSApp.activate(ignoringOtherApps: true)
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                let urls = [
+                    "x-apple.systempreferences:com.apple.Trackpad-Settings.extension",
+                    "x-apple.systempreferences:com.apple.preference.trackpad"
+                ]
+                for raw in urls {
+                    if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                        break
+                    }
+                }
+            }
+
+            self.settings.hasShownFirstRunGuide = true
         }
     }
 
