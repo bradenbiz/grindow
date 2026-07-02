@@ -87,16 +87,16 @@ class GestureInterceptor: ObservableObject {
 
     @Published var isActive: Bool = false
 
-    /// Called when a vertical three-finger swipe is detected.
+    /// Called when a three-finger swipe is detected in any of the four directions.
     var onSwipe: ((SwipeDirection) -> Void)?
 
     // MARK: - Tunables
 
     private let minFingerCount: Int = 3
-    /// Minimum |Δy| (in normalized [0,1] pad coords) before a swipe fires.
-    private let minVerticalDelta: Float = 0.08
-    /// |Δy| must exceed |Δx| by this factor to count as vertical.
-    private let minVerticalDominance: Float = 1.5
+    /// Minimum |Δ| (in normalized [0,1] pad coords) before a swipe fires.
+    private let minAxialDelta: Float = 0.08
+    /// Dominant axis must exceed the other by this factor.
+    private let minAxialDominance: Float = 1.5
 
     // MARK: - State (main queue only)
 
@@ -219,18 +219,28 @@ class GestureInterceptor: ObservableObject {
 
         let avgDX = sumDX / count
         let avgDY = sumDY / count
+        let absDX = abs(avgDX)
+        let absDY = abs(avgDY)
 
-        guard abs(avgDY) >= minVerticalDelta else { return }
-        guard abs(avgDY) >= abs(avgDX) * minVerticalDominance else { return }
-
-        // MT normalized coords: y=0 is near the user, y=1 is far.
-        // Fingers moving away from the user → avgDY > 0 → swipe up.
-        // If `invertVerticalSwipe` is on, flip — useful when direction feels
-        // backwards on the user's hardware/macOS combination.
-        var direction: SwipeDirection = avgDY > 0 ? .up : .down
-        if AppSettings.shared.invertVerticalSwipe {
-            direction = (direction == .up) ? .down : .up
+        // Pick the dominant axis. If neither axis has enough travel, or neither
+        // dominates the other, don't emit.
+        let direction: SwipeDirection
+        if absDY >= minAxialDelta && absDY >= absDX * minAxialDominance {
+            // MT normalized coords: y=0 is near the user, y=1 is far.
+            // Fingers moving away from the user → avgDY > 0 → swipe up.
+            var d: SwipeDirection = avgDY > 0 ? .up : .down
+            if AppSettings.shared.invertVerticalSwipe {
+                d = (d == .up) ? .down : .up
+            }
+            direction = d
+        } else if absDX >= minAxialDelta && absDX >= absDY * minAxialDominance {
+            // MT normalized coords: x=0 is left, x=1 is right.
+            // Fingers moving right → avgDX > 0 → swipe right.
+            direction = avgDX > 0 ? .right : .left
+        } else {
+            return
         }
+
         swipeEmittedForCurrentGesture = true
         onSwipe?(direction)
     }

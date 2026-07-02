@@ -63,6 +63,22 @@ class SpaceManager: ObservableObject {
 
     // MARK: - Space Detection
 
+    /// UUID strings of all displays currently connected, matching the format of
+    /// CGS's "Display Identifier". Uses public CoreGraphics APIs.
+    private func connectedDisplayUUIDs() -> Set<String> {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+
+        var uuids = Set<String>()
+        for id in ids {
+            guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { continue }
+            uuids.insert(CFUUIDCreateString(nil, cf) as String)
+        }
+        return uuids
+    }
+
     /// Refreshes the list of all spaces from the system.
     func refreshSpaces() {
         guard let displaySpaces = CGSCopyManagedDisplaySpaces(connection) as? [[String: Any]] else {
@@ -72,8 +88,18 @@ class SpaceManager: ObservableObject {
         var detectedSpaces: [SpaceInfo] = []
         var globalIndex = 0
 
+        // Only include displays that are physically connected right now. macOS
+        // retains Space arrangements for displays you've previously attached
+        // (external monitors), and CGSCopyManagedDisplaySpaces returns those
+        // "ghost" displays too. Their spaces can't be switched to or detected as
+        // active, so filtering them out is required for correct navigation.
+        let connected = connectedDisplayUUIDs()
+
         for displayInfo in displaySpaces {
             let displayUUID = displayInfo["Display Identifier"] as? String ?? "Unknown"
+            // Keep the display if it's connected. If we couldn't resolve any
+            // connected UUIDs (unexpected), fall back to including everything.
+            if !connected.isEmpty && !connected.contains(displayUUID) { continue }
             guard let spacesArray = displayInfo["Spaces"] as? [[String: Any]] else { continue }
 
             for spaceDict in spacesArray {
@@ -108,9 +134,19 @@ class SpaceManager: ObservableObject {
             }
         }
 
-        DispatchQueue.main.async {
+        // Assign synchronously. All callers (init, the space-change observer,
+        // and the popover refresh) run on the main thread, and downstream setup
+        // (grid arrangement) reads `spaces` synchronously right after calling
+        // this — deferring the assignment onto the run loop left the grid empty
+        // at launch. Guard the thread just in case a future caller is off-main.
+        let apply = {
             self.spaces = detectedSpaces
             self.activeSpaceID = CGSGetActiveSpace(self.connection)
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.sync(execute: apply)
         }
     }
 

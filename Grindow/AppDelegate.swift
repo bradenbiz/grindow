@@ -113,7 +113,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Space Grid
 
     private func setupSpaceGrid() {
+        rebuildGrid()
+
+        // Set initial position
+        let activeID = spaceManager.getActiveSpaceID()
+        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
+
+        // Observe space changes to keep the grid membership and current
+        // position in sync as desktops are added/removed or switched.
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            // If the set of spaces changed (desktop added/removed), rebuild.
+            let live = Set(self.spaceManager.spaces.map { $0.id })
+            let known = Set(self.spaceGrid.allSpaceIDs.filter { $0 != 0 })
+            if live != known {
+                self.rebuildGrid()
+            }
+            let newActiveID = self.spaceManager.getActiveSpaceID()
+            self.spaceGrid.updateCurrentPosition(forSpaceID: newActiveID)
+        }
+    }
+
+    /// (Re)arranges the grid from the current spaces, preferring a saved layout
+    /// only when all of its IDs still correspond to real spaces.
+    private func rebuildGrid() {
         let spaceIDs = spaceManager.spaces.map { $0.id }
+        guard !spaceIDs.isEmpty else { return }  // never persist an empty grid
         let currentSet = Set(spaceIDs)
 
         // Discard a saved layout if any of its IDs no longer correspond to a
@@ -121,7 +150,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // when the user adds/removes desktops outside Grindow.
         let savedNonZero = settings.gridLayout.filter { $0 != 0 }
         let savedAllValid = !savedNonZero.isEmpty
-            && savedNonZero.allSatisfy { currentSet.contains($0) }
+            && Set(savedNonZero) == currentSet
 
         if savedAllValid {
             spaceGrid.arrange(
@@ -136,21 +165,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 columns: settings.gridColumns
             )
             settings.gridLayout = spaceIDs
-        }
-
-        // Set initial position
-        let activeID = spaceManager.getActiveSpaceID()
-        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
-        // Observe space changes to update current position
-        NotificationCenter.default.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self = self else { return }
-            let newActiveID = self.spaceManager.getActiveSpaceID()
-            self.spaceGrid.updateCurrentPosition(forSpaceID: newActiveID)
         }
     }
 
@@ -191,11 +205,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let current = spaceGrid.currentPosition
 
-        if let targetPosition = spaceGrid.targetPosition(
+        let target = spaceGrid.targetPosition(
             from: current,
             direction: direction,
             edgeBehavior: settings.edgeBehavior
-        ) {
+        )
+
+        if let targetPosition = target {
             // Valid target — switch to it
             spaceManager.switchToSpace(at: targetPosition, in: spaceGrid)
         } else {
