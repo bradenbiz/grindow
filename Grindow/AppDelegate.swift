@@ -32,7 +32,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopover()
         setupSpaceGrid()
         setupGestureInterceptor()
-        checkAccessibility()
         setupEventMonitor()
         showFirstRunGuideIfNeeded()
     }
@@ -91,11 +90,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.close()
         } else {
-            // Refresh data before showing
-            spaceManager.refreshSpaces()
-            let activeID = spaceManager.getActiveSpaceID()
-            spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
+            // Always show the latest state when opening.
+            syncGridToSystem()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
@@ -114,28 +110,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupSpaceGrid() {
         rebuildGrid()
+        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.getActiveSpaceID())
 
-        // Set initial position
-        let activeID = spaceManager.getActiveSpaceID()
-        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
-        // Observe space changes to keep the grid membership and current
-        // position in sync as desktops are added/removed or switched.
+        // Keep the grid in sync as spaces are switched, added, or removed.
         NotificationCenter.default.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self else { return }
-            // If the set of spaces changed (desktop added/removed), rebuild.
-            let live = Set(self.spaceManager.spaces.map { $0.id })
-            let known = Set(self.spaceGrid.allSpaceIDs.filter { $0 != 0 })
-            if live != known {
-                self.rebuildGrid()
-            }
-            let newActiveID = self.spaceManager.getActiveSpaceID()
-            self.spaceGrid.updateCurrentPosition(forSpaceID: newActiveID)
+            self?.syncGridToSystem()
         }
+    }
+
+    /// Pulls the latest spaces from the system and reconciles the grid: rebuilds
+    /// membership if the set changed, then updates the current position. Cheap
+    /// enough to call on every space change and whenever the popover opens, so
+    /// the grid is always current without any manual "refresh".
+    private func syncGridToSystem() {
+        spaceManager.refreshSpaces()
+        let live = Set(spaceManager.spaces.map { $0.id })
+        let known = Set(spaceGrid.allSpaceIDs.filter { $0 != 0 })
+        if live != known {
+            rebuildGrid()
+        }
+        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.getActiveSpaceID())
     }
 
     /// (Re)arranges the grid from the current spaces, preferring a saved layout
@@ -218,22 +216,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // At the edge
             if settings.edgeBehavior == .bounce && settings.showBounceAnimation {
                 BounceOverlayController.shared.showBounce(direction: direction)
-            }
-        }
-    }
-
-    // MARK: - Accessibility
-
-    private func checkAccessibility() {
-        if !AccessibilityHelper.shared.isAccessibilityGranted {
-            AccessibilityHelper.shared.checkAndPrompt()
-
-            // Poll for permission grant
-            AccessibilityHelper.shared.waitForPermission { [weak self] in
-                guard let self = self else { return }
-                if self.settings.isEnabled {
-                    self.gestureInterceptor.start()
-                }
             }
         }
     }

@@ -43,28 +43,6 @@ struct SettingsView: View {
 
             Divider()
 
-            Section("Accessibility") {
-                HStack {
-                    let granted = AccessibilityHelper.shared.isAccessibilityGranted
-                    Circle()
-                        .fill(granted ? Color.green : Color.red)
-                        .frame(width: 8, height: 8)
-                    Text(granted ? "Accessibility access granted" : "Accessibility access required")
-                        .font(.body)
-
-                    Spacer()
-
-                    if !granted {
-                        Button("Grant Access") {
-                            AccessibilityHelper.shared.requestAccessibility()
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
-            }
-
-            Divider()
-
             Section("Info") {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Grindow extends macOS Spaces into a 2D grid.")
