@@ -21,6 +21,23 @@ private func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 @_silgen_name("CGSManagedDisplaySetCurrentSpace")
 private func CGSManagedDisplaySetCurrentSpace(_ connection: CGSConnectionID, _ display: CFString, _ space: UInt64)
 
+// MARK: - DIAG file logger (disabled; multi-monitor / stuck-desktop investigation)
+//
+// Appends to /tmp/grindow-gesture.log. NSLog does NOT reliably reach the unified
+// log for this app, so a file logger is used instead. To re-enable the switch/
+// roster tracing, uncomment this helper plus the `// DIAG:` blocks in
+// refreshSpaces() and switchToSpace(id:) and the `diagLastRoster` property below.
+//
+// private let gdiagPath = "/tmp/grindow-gesture.log"
+// func gdiag(_ msg: String) {
+//     guard let data = (msg + "\n").data(using: .utf8) else { return }
+//     if let fh = FileHandle(forWritingAtPath: gdiagPath) {
+//         fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+//     } else {
+//         try? data.write(to: URL(fileURLWithPath: gdiagPath))
+//     }
+// }
+
 // MARK: - Space information
 
 struct SpaceInfo: Identifiable, Equatable {
@@ -48,6 +65,7 @@ class SpaceManager: ObservableObject {
 
     private var connection: CGSConnectionID = 0
     private var spaceChangeObserver: NSObjectProtocol?
+    // private var diagLastRoster: [UInt64] = []  // DIAG
 
     private init() {
         connection = CGSMainConnectionID()
@@ -148,6 +166,18 @@ class SpaceManager: ObservableObject {
         } else {
             DispatchQueue.main.sync(execute: apply)
         }
+
+        // DIAG: dump the roster whenever it changes so we can see exactly what
+        // each cell (esp. "Desktop 1") maps to. Disabled — see gdiag helper above.
+        // let roster = detectedSpaces.map { $0.id }
+        // if roster != diagLastRoster {
+        //     diagLastRoster = roster
+        //     let active = CGSGetActiveSpace(connection)
+        //     gdiag("ROSTER (active=\(active)):")
+        //     for s in detectedSpaces {
+        //         gdiag("  idx=\(s.index) id=\(s.id) type=\(s.type.rawValue) display=\(s.displayUUID) label=\(s.label)")
+        //     }
+        // }
     }
 
     /// Returns the active space ID.
@@ -162,11 +192,20 @@ class SpaceManager: ObservableObject {
     /// `CGSManagedDisplaySetCurrentSpace` SPI. Instant; no keyboard
     /// simulation, no dependency on user-bound shortcuts.
     func switchToSpace(id targetSpaceID: UInt64) {
-        guard targetSpaceID != activeSpaceID else { return }
-        guard let target = spaces.first(where: { $0.id == targetSpaceID }) else { return }
+        guard targetSpaceID != activeSpaceID else { return }   // DIAG: gdiag("switch SKIP …")
+        guard let target = spaces.first(where: { $0.id == targetSpaceID }) else { return }  // DIAG: gdiag("switch ABORT …")
 
         let displayUUID = target.displayUUID as CFString
         CGSManagedDisplaySetCurrentSpace(connection, displayUUID, targetSpaceID)
+
+        // DIAG: trace the switch and whether it actually took (main-display only).
+        // let preActive = CGSGetActiveSpace(connection)
+        // gdiag("switch CALL target=\(targetSpaceID) type=\(target.type.rawValue) display=\(target.displayUUID) pre=\(preActive)")
+        // DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        //     guard let self = self else { return }
+        //     let post = CGSGetActiveSpace(self.connection)
+        //     gdiag("switch RESULT target=\(targetSpaceID) post=\(post) \(post == targetSpaceID ? "OK" : "FAILED")")
+        // }
 
         // The activeSpaceDidChangeNotification observer will reconcile
         // `activeSpaceID` once macOS finishes the transition. Update

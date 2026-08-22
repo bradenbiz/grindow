@@ -41,9 +41,11 @@ meaning of *space / desktop / full-screen app / app / window / cell / grid*.
   root cause of the next item.
 - **"Desktop 1" (and some cells) won't switch; swiping to/from them gets stuck.**
   Under active investigation. Desktop 1 = space `id=3`, type 0, main display.
-  Diagnostics for this live **uncommitted** in `SpaceManager.swift` (a `/tmp`
-  file-logger + roster dump + switch CALL/RESULT). Repro to capture: open popover,
-  click "Desktop 1", read `/tmp/grindow-gesture.log`.
+  Diagnostics for this are **committed but commented out** in `SpaceManager.swift`
+  (a `/tmp` file-logger + roster dump + switch CALL/RESULT). To re-enable, uncomment
+  the `gdiag` helper, the `diagLastRoster` property, and the `// DIAG:` blocks in
+  `refreshSpaces()` / `switchToSpace(id:)`. Repro to capture: open popover, click
+  "Desktop 1", read `/tmp/grindow-gesture.log`.
 - **Full-screen / minimize breaks.** Taking a window full-screen tries then snaps
   back; minimizing lands the window in front of a full-screen space instead of a
   regular desktop. Not yet investigated; may be tied to multi-monitor / direct
