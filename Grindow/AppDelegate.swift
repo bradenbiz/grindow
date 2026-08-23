@@ -32,8 +32,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopover()
         setupSpaceGrid()
         setupGestureInterceptor()
-        checkAccessibility()
         setupEventMonitor()
+        showFirstRunGuideIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -90,11 +90,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.close()
         } else {
-            // Refresh data before showing
-            spaceManager.refreshSpaces()
-            let activeID = spaceManager.getActiveSpaceID()
-            spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
+            // Always show the latest state when opening.
+            syncGridToSystem()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
@@ -112,10 +109,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Space Grid
 
     private func setupSpaceGrid() {
-        let spaceIDs = spaceManager.spaces.map { $0.id }
+        rebuildGrid()
+        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.getActiveSpaceID())
 
-        // Restore saved layout or auto-arrange
-        if !settings.gridLayout.isEmpty {
+        // Keep the grid in sync as spaces are switched, added, or removed.
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncGridToSystem()
+        }
+    }
+
+    /// Pulls the latest spaces from the system and reconciles the grid: rebuilds
+    /// membership if the set changed, then updates the current position. Cheap
+    /// enough to call on every space change and whenever the popover opens, so
+    /// the grid is always current without any manual "refresh".
+    private func syncGridToSystem() {
+        spaceManager.refreshSpaces()
+        let live = Set(spaceManager.spaces.map { $0.id })
+        let known = Set(spaceGrid.allSpaceIDs.filter { $0 != 0 })
+        if live != known {
+            rebuildGrid()
+        }
+        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.getActiveSpaceID())
+    }
+
+    /// (Re)arranges the grid from the current spaces, preferring a saved layout
+    /// only when all of its IDs still correspond to real spaces.
+    private func rebuildGrid() {
+        let spaceIDs = spaceManager.spaces.map { $0.id }
+        guard !spaceIDs.isEmpty else { return }  // never persist an empty grid
+        let currentSet = Set(spaceIDs)
+
+        // Discard a saved layout if any of its IDs no longer correspond to a
+        // real space — happens after our phantom-space filter kicks in, or
+        // when the user adds/removes desktops outside Grindow.
+        let savedNonZero = settings.gridLayout.filter { $0 != 0 }
+        let savedAllValid = !savedNonZero.isEmpty
+            && Set(savedNonZero) == currentSet
+
+        if savedAllValid {
             spaceGrid.arrange(
                 spaceIDs: settings.gridLayout,
                 rows: settings.gridRows,
@@ -127,21 +162,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 rows: settings.gridRows,
                 columns: settings.gridColumns
             )
-        }
-
-        // Set initial position
-        let activeID = spaceManager.getActiveSpaceID()
-        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
-        // Observe space changes to update current position
-        NotificationCenter.default.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self = self else { return }
-            let newActiveID = self.spaceManager.getActiveSpaceID()
-            self.spaceGrid.updateCurrentPosition(forSpaceID: newActiveID)
+            settings.gridLayout = spaceIDs
         }
     }
 
@@ -149,18 +170,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupGestureInterceptor() {
         gestureInterceptor.onSwipe = { [weak self] direction in
-            print("GRINDOW: onSwipe direction=\(direction)")
             self?.handleSwipe(direction: direction)
         }
 
-        if settings.isEnabled && AccessibilityHelper.shared.isAccessibilityGranted {
+        // MultitouchSupport doesn't require Accessibility — only the
+        // keyboard-simulation path for space switching does. Start the
+        // interceptor unconditionally if the user has Grindow enabled.
+        if settings.isEnabled {
             gestureInterceptor.start()
         }
 
-        // Observe settings changes
         settings.$isEnabled.receive(on: DispatchQueue.main).sink { [weak self] enabled in
             guard let self = self else { return }
-            if enabled && AccessibilityHelper.shared.isAccessibilityGranted {
+            if enabled {
                 self.gestureInterceptor.start()
             } else {
                 self.gestureInterceptor.stop()
@@ -181,11 +203,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let current = spaceGrid.currentPosition
 
-        if let targetPosition = spaceGrid.targetPosition(
+        let target = spaceGrid.targetPosition(
             from: current,
             direction: direction,
             edgeBehavior: settings.edgeBehavior
-        ) {
+        )
+
+        if let targetPosition = target {
             // Valid target — switch to it
             spaceManager.switchToSpace(at: targetPosition, in: spaceGrid)
         } else {
@@ -196,19 +220,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Accessibility
+    // MARK: - First-Run Guide
 
-    private func checkAccessibility() {
-        if !AccessibilityHelper.shared.isAccessibilityGranted {
-            AccessibilityHelper.shared.checkAndPrompt()
+    /// On first launch, prompt the user to disable macOS's built-in three-finger
+    /// gestures so Grindow's vertical-swipe handler isn't fighting Mission Control.
+    private func showFirstRunGuideIfNeeded() {
+        guard !settings.hasShownFirstRunGuide else { return }
 
-            // Poll for permission grant
-            AccessibilityHelper.shared.waitForPermission { [weak self] in
-                guard let self = self else { return }
-                if self.settings.isEnabled {
-                    self.gestureInterceptor.start()
+        // Defer so the menu bar item shows up first and the alert isn't presented
+        // before the rest of the UI is ready.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self = self else { return }
+
+            let alert = NSAlert()
+            alert.messageText = "One quick setup step"
+            alert.informativeText = """
+            Grindow uses three-finger vertical swipes to navigate your space grid. \
+            macOS uses the same gesture for Mission Control and App Exposé by default, \
+            so they will fight each other until you turn the built-in versions off.
+
+            In System Settings → Trackpad → More Gestures, set both \
+            "Swipe between full-screen apps" and "Mission Control" to "Off" \
+            (or switch them to four fingers).
+
+            Horizontal three-finger swipes will keep working as normal.
+            """
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Open Trackpad Settings")
+            alert.addButton(withTitle: "Later")
+
+            NSApp.activate(ignoringOtherApps: true)
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                let urls = [
+                    "x-apple.systempreferences:com.apple.Trackpad-Settings.extension",
+                    "x-apple.systempreferences:com.apple.preference.trackpad"
+                ]
+                for raw in urls {
+                    if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                        break
+                    }
                 }
             }
+
+            self.settings.hasShownFirstRunGuide = true
         }
     }
 

@@ -18,14 +18,25 @@ private func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArr
 @_silgen_name("CGSGetActiveSpace")
 private func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 
-@_silgen_name("CGSMoveWorkspaceToSpace")
-private func CGSMoveWorkspaceToSpace(_ connection: CGSConnectionID, _ workspaceID: Int, _ spaceID: UInt64)
+@_silgen_name("CGSManagedDisplaySetCurrentSpace")
+private func CGSManagedDisplaySetCurrentSpace(_ connection: CGSConnectionID, _ display: CFString, _ space: UInt64)
 
-@_silgen_name("CGSAddWindowsToSpaces")
-private func CGSAddWindowsToSpaces(_ connection: CGSConnectionID, _ windowIDs: CFArray, _ spaceIDs: CFArray)
-
-@_silgen_name("CGSRemoveWindowsFromSpaces")
-private func CGSRemoveWindowsFromSpaces(_ connection: CGSConnectionID, _ windowIDs: CFArray, _ spaceIDs: CFArray)
+// MARK: - DIAG file logger (disabled; multi-monitor / stuck-desktop investigation)
+//
+// Appends to /tmp/grindow-gesture.log. NSLog does NOT reliably reach the unified
+// log for this app, so a file logger is used instead. To re-enable the switch/
+// roster tracing, uncomment this helper plus the `// DIAG:` blocks in
+// refreshSpaces() and switchToSpace(id:) and the `diagLastRoster` property below.
+//
+// private let gdiagPath = "/tmp/grindow-gesture.log"
+// func gdiag(_ msg: String) {
+//     guard let data = (msg + "\n").data(using: .utf8) else { return }
+//     if let fh = FileHandle(forWritingAtPath: gdiagPath) {
+//         fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+//     } else {
+//         try? data.write(to: URL(fileURLWithPath: gdiagPath))
+//     }
+// }
 
 // MARK: - Space information
 
@@ -54,6 +65,7 @@ class SpaceManager: ObservableObject {
 
     private var connection: CGSConnectionID = 0
     private var spaceChangeObserver: NSObjectProtocol?
+    // private var diagLastRoster: [UInt64] = []  // DIAG
 
     private init() {
         connection = CGSMainConnectionID()
@@ -69,6 +81,22 @@ class SpaceManager: ObservableObject {
 
     // MARK: - Space Detection
 
+    /// UUID strings of all displays currently connected, matching the format of
+    /// CGS's "Display Identifier". Uses public CoreGraphics APIs.
+    private func connectedDisplayUUIDs() -> Set<String> {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+
+        var uuids = Set<String>()
+        for id in ids {
+            guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { continue }
+            uuids.insert(CFUUIDCreateString(nil, cf) as String)
+        }
+        return uuids
+    }
+
     /// Refreshes the list of all spaces from the system.
     func refreshSpaces() {
         guard let displaySpaces = CGSCopyManagedDisplaySpaces(connection) as? [[String: Any]] else {
@@ -78,8 +106,18 @@ class SpaceManager: ObservableObject {
         var detectedSpaces: [SpaceInfo] = []
         var globalIndex = 0
 
+        // Only include displays that are physically connected right now. macOS
+        // retains Space arrangements for displays you've previously attached
+        // (external monitors), and CGSCopyManagedDisplaySpaces returns those
+        // "ghost" displays too. Their spaces can't be switched to or detected as
+        // active, so filtering them out is required for correct navigation.
+        let connected = connectedDisplayUUIDs()
+
         for displayInfo in displaySpaces {
             let displayUUID = displayInfo["Display Identifier"] as? String ?? "Unknown"
+            // Keep the display if it's connected. If we couldn't resolve any
+            // connected UUIDs (unexpected), fall back to including everything.
+            if !connected.isEmpty && !connected.contains(displayUUID) { continue }
             guard let spacesArray = displayInfo["Spaces"] as? [[String: Any]] else { continue }
 
             for spaceDict in spacesArray {
@@ -88,14 +126,19 @@ class SpaceManager: ObservableObject {
                 }
 
                 let typeRaw = spaceDict["type"] as? Int ?? -1
+                // Skip phantom entries — only real desktop (0) and fullscreen (4) spaces
+                // should appear in the grid. Other type values are tiles, dashboards,
+                // and other system-internal entries.
+                guard typeRaw == 0 || typeRaw == 4 else { continue }
                 let type = SpaceInfo.SpaceType(rawValue: typeRaw) ?? .unknown
 
-                let label: String
+                let autoLabel: String
                 if type == .fullscreen {
-                    label = fullscreenAppName(forSpaceID: spaceID) ?? "Full Screen \(globalIndex + 1)"
+                    autoLabel = "Full Screen \(globalIndex + 1)"
                 } else {
-                    label = "Desktop \(globalIndex + 1)"
+                    autoLabel = "Desktop \(globalIndex + 1)"
                 }
+                let label = AppSettings.shared.customName(forSpaceID: spaceID) ?? autoLabel
 
                 let info = SpaceInfo(
                     id: spaceID,
@@ -109,10 +152,32 @@ class SpaceManager: ObservableObject {
             }
         }
 
-        DispatchQueue.main.async {
+        // Assign synchronously. All callers (init, the space-change observer,
+        // and the popover refresh) run on the main thread, and downstream setup
+        // (grid arrangement) reads `spaces` synchronously right after calling
+        // this — deferring the assignment onto the run loop left the grid empty
+        // at launch. Guard the thread just in case a future caller is off-main.
+        let apply = {
             self.spaces = detectedSpaces
             self.activeSpaceID = CGSGetActiveSpace(self.connection)
         }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.sync(execute: apply)
+        }
+
+        // DIAG: dump the roster whenever it changes so we can see exactly what
+        // each cell (esp. "Desktop 1") maps to. Disabled — see gdiag helper above.
+        // let roster = detectedSpaces.map { $0.id }
+        // if roster != diagLastRoster {
+        //     diagLastRoster = roster
+        //     let active = CGSGetActiveSpace(connection)
+        //     gdiag("ROSTER (active=\(active)):")
+        //     for s in detectedSpaces {
+        //         gdiag("  idx=\(s.index) id=\(s.id) type=\(s.type.rawValue) display=\(s.displayUUID) label=\(s.label)")
+        //     }
+        // }
     }
 
     /// Returns the active space ID.
@@ -123,32 +188,29 @@ class SpaceManager: ObservableObject {
 
     // MARK: - Space Switching
 
-    /// Switches to a space by its ID using keyboard shortcut simulation.
-    /// This is more reliable than direct CGS API calls for space switching.
+    /// Switches to a space by its ID via the private
+    /// `CGSManagedDisplaySetCurrentSpace` SPI. Instant; no keyboard
+    /// simulation, no dependency on user-bound shortcuts.
     func switchToSpace(id targetSpaceID: UInt64) {
-        guard targetSpaceID != activeSpaceID else { return }
+        guard targetSpaceID != activeSpaceID else { return }   // DIAG: gdiag("switch SKIP …")
+        guard let target = spaces.first(where: { $0.id == targetSpaceID }) else { return }  // DIAG: gdiag("switch ABORT …")
 
-        // Find the index of the target space
-        guard let targetIndex = spaces.firstIndex(where: { $0.id == targetSpaceID }),
-              let currentIndex = spaces.firstIndex(where: { $0.id == activeSpaceID }) else {
-            return
-        }
+        let displayUUID = target.displayUUID as CFString
+        CGSManagedDisplaySetCurrentSpace(connection, displayUUID, targetSpaceID)
 
-        let target = spaces[targetIndex].index
-        let current = spaces[currentIndex].index
+        // DIAG: trace the switch and whether it actually took (main-display only).
+        // let preActive = CGSGetActiveSpace(connection)
+        // gdiag("switch CALL target=\(targetSpaceID) type=\(target.type.rawValue) display=\(target.displayUUID) pre=\(preActive)")
+        // DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        //     guard let self = self else { return }
+        //     let post = CGSGetActiveSpace(self.connection)
+        //     gdiag("switch RESULT target=\(targetSpaceID) post=\(post) \(post == targetSpaceID ? "OK" : "FAILED")")
+        // }
 
-        // Try direct keyboard shortcut first (Ctrl+Number for spaces 1-9)
-        if target < 9 {
-            if simulateSpaceSwitchKeyboard(spaceNumber: target + 1) {
-                return
-            }
-        }
-
-        // Fallback: simulate sequential Ctrl+Arrow key presses
-        let diff = target - current
-        if diff != 0 {
-            simulateSequentialArrowSwitch(steps: diff)
-        }
+        // The activeSpaceDidChangeNotification observer will reconcile
+        // `activeSpaceID` once macOS finishes the transition. Update
+        // optimistically so the UI reflects the new state immediately.
+        activeSpaceID = targetSpaceID
     }
 
     /// Switches to the space at the given grid position using the SpaceGrid.
@@ -156,86 +218,6 @@ class SpaceManager: ObservableObject {
         guard let targetID = grid.spaceID(at: position) else { return }
         switchToSpace(id: targetID)
         grid.currentPosition = position
-    }
-
-    // MARK: - Keyboard Simulation
-
-    /// Simulates Ctrl+Number shortcut to jump directly to a space.
-    /// Returns true if the shortcut was sent successfully.
-    /// Note: User must have "Switch to Desktop N" shortcuts enabled in
-    /// System Preferences > Keyboard > Shortcuts > Mission Control.
-    private func simulateSpaceSwitchKeyboard(spaceNumber: Int) -> Bool {
-        guard spaceNumber >= 1 && spaceNumber <= 9 else { return false }
-
-        // Key codes for 1-9
-        let keyCodes: [Int: CGKeyCode] = [
-            1: 18, 2: 19, 3: 20, 4: 21, 5: 23,
-            6: 22, 7: 26, 8: 28, 9: 25
-        ]
-
-        guard let keyCode = keyCodes[spaceNumber] else { return false }
-
-        let source = CGEventSource(stateID: .hidSystemState)
-
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
-            return false
-        }
-
-        // Add Control modifier
-        keyDown.flags = .maskControl
-        keyUp.flags = .maskControl
-
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
-
-        return true
-    }
-
-    /// Simulates sequential Ctrl+Arrow presses to move between spaces.
-    private func simulateSequentialArrowSwitch(steps: Int) {
-        let direction: CGKeyCode = steps > 0 ? 124 : 123  // Right : Left arrow
-        let count = abs(steps)
-
-        let source = CGEventSource(stateID: .hidSystemState)
-
-        for i in 0..<count {
-            let delay = DispatchTimeInterval.milliseconds(i * 300)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: direction, keyDown: true),
-                      let keyUp = CGEvent(keyboardEventSource: source, virtualKey: direction, keyDown: false) else {
-                    return
-                }
-
-                keyDown.flags = .maskControl
-                keyUp.flags = .maskControl
-
-                keyDown.post(tap: .cghidEventTap)
-                keyUp.post(tap: .cghidEventTap)
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
-    /// Attempts to find the app name for a full-screen space.
-    private func fullscreenAppName(forSpaceID spaceID: UInt64) -> String? {
-        // Get all windows and find the one on this space
-        let options: CGWindowListOption = [.optionAll]
-        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-
-        for window in windowList {
-            if let ownerName = window[kCGWindowOwnerName as String] as? String,
-               let layer = window[kCGWindowLayer as String] as? Int,
-               layer == 0 {
-                // Heuristic: check if this window's app might be in the fullscreen space
-                // This is imperfect without more private APIs
-                return ownerName
-            }
-        }
-        return nil
     }
 
     // MARK: - Space Change Observation

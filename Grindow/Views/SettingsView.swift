@@ -26,6 +26,12 @@ struct SettingsView: View {
                     Toggle("Show bounce animation overlay", isOn: $settings.showBounceAnimation)
                         .padding(.leading, 20)
                 }
+
+                Toggle("Invert vertical swipe direction", isOn: $settings.invertVerticalSwipe)
+                Text("Flip if three-finger up moves you down (or vice versa).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
             }
 
             Divider()
@@ -33,28 +39,6 @@ struct SettingsView: View {
             Section("General") {
                 Toggle("Enable Grindow", isOn: $settings.isEnabled)
                 Toggle("Launch at Login", isOn: $settings.launchAtLogin)
-            }
-
-            Divider()
-
-            Section("Accessibility") {
-                HStack {
-                    let granted = AccessibilityHelper.shared.isAccessibilityGranted
-                    Circle()
-                        .fill(granted ? Color.green : Color.red)
-                        .frame(width: 8, height: 8)
-                    Text(granted ? "Accessibility access granted" : "Accessibility access required")
-                        .font(.body)
-
-                    Spacer()
-
-                    if !granted {
-                        Button("Grant Access") {
-                            AccessibilityHelper.shared.requestAccessibility()
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
             }
 
             Divider()

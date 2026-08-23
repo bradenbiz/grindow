@@ -78,9 +78,9 @@ struct MenuBarView: View {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(isCurrent ? Color.accentColor : (hasSpace ? Color(nsColor: .controlColor) : Color.clear))
 
-                if hasSpace {
-                    Text(spaceInfo?.label.prefix(3).description ?? "?")
-                        .font(.system(size: 8))
+                if let info = spaceInfo {
+                    Text(shortLabel(for: info))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundColor(isCurrent ? .white : .primary)
                 }
             }
@@ -88,6 +88,16 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
         .frame(width: 36, height: 28)
         .help(spaceInfo?.label ?? "Empty")
+    }
+
+    /// Compact label for a tiny grid cell: the start of a custom name, or a
+    /// number (prefixed for full-screen spaces) so cells are distinguishable
+    /// instead of every desktop showing "Des".
+    private func shortLabel(for info: SpaceInfo) -> String {
+        if let custom = settings.customName(forSpaceID: info.id) {
+            return String(custom.prefix(4))
+        }
+        return info.type == .fullscreen ? "⤢\(info.index + 1)" : "\(info.index + 1)"
     }
 
     // MARK: - Controls
