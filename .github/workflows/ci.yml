@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Swift tests
+        run: swift test
+
+      - name: Native C tests
+        run: sh Scripts/test-native.sh
+
+      # No signing identity exists on the runner; this only proves the app compiles and links.
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project Grindow.xcodeproj -target Grindow -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build

@@ -1,6 +1,9 @@
 # Testing options: letting Claude verify changes without you
 
-Status: proposal, nothing chosen yet (2026-10-02).
+Status (2026-10-03): **A and B are implemented in this PR**
+(`.github/workflows/ci.yml`, `Models/ThreeFingerSwipeRecognizer.swift`,
+`Tests/SwipeRecognizerTests.swift`). G comes next, after PR #4 lands, because it
+touches the same files. C and E are deferred. D is declined (see below).
 
 ## The problem
 
@@ -33,10 +36,12 @@ Claude pushes a branch, then reads the results with `gh run view --log-failed`.
 - **Covers:** compiling, all SwiftPM tests, native C burst tests.
 - **Doesn't cover:** gestures, real Space switching (runners are VMs with no
   trackpad, and Accessibility isn't granted).
-- **Cost:** standard GitHub-hosted runners are free for public repos, and this repo
-  is public. A run takes a few minutes.
-- **Effort:** small. One workflow file. Pin a macOS image and Xcode version
-  that support Swift 6.x / macOS 26 SDK APIs.
+- **Cost:** free. Standard GitHub-hosted runners, macOS included, are free and
+  unmetered for public repos, and this repo is public. If the repo goes private,
+  macOS minutes are billed at $0.062/min (2026 pricing) after the plan's included
+  minutes, which count 10x for macOS. A run takes a few minutes.
+- **Effort:** small. One workflow file on the `macos-26` image. The workflow
+  logs the Xcode and Swift versions it used.
 - **Risk:** low. Possible Xcode-version drift between your Mac and the runner.
 
 ### B. Pull gesture recognition out into a testable type
@@ -58,6 +63,10 @@ frames: "3 fingers land, 4th lands 2 frames later, all move up 0.1 → no swipe"
 - **Risk:** low. Behavior should stay the same, and the tests prove it.
 
 ### C. Record and replay real touch frames
+
+C builds on B; it doesn't replace it. B's hand-written frames stay as readable
+specs for each rule. C adds real recordings, so the timing matches what your
+fingers actually do.
 
 Add a hidden debug setting that writes raw MultitouchSupport frames (id, state,
 normalized position, timestamp) to a JSON file. You record the awkward gestures
@@ -87,8 +96,11 @@ launch the app and read its logs.
 - **Cost:** free on your own Mac. A cloud Mac costs real money and is mostly
   idle.
 - **Effort:** small on your Mac.
-- **Risk:** medium. Claude gets shell access to a machine. On your own Mac,
-  limit it to a separate user account.
+- **Risk:** medium. Claude gets shell access to a machine. **Declined for now:**
+  the only Mac available is the MacBook Pro you work on. A shell there could
+  reach your files, and anything that switches Spaces would take over your
+  screen while you type. If it's ever wanted, use a separate macOS user account
+  with nothing personal in it. A covers builds and tests without any of this.
 
 ### E. Self-hosted GitHub Actions runner on your Mac
 
@@ -153,9 +165,11 @@ and **E** as later upgrades.
 Skip **D** unless you want Claude running ad-hoc commands on your Mac; A covers
 most of what it offers without giving shell access. **F** isn't viable.
 
-## Proposed order of work
+## Order of work
 
-1. PR: `.github/workflows/ci.yml` (A). Fix anything it finds in PR #4.
-2. PR: extract `ThreeFingerSwipeRecognizer` and add tests (B).
+1. This PR: CI (A) and the extracted recognizer with tests (B). Behavior is
+   unchanged; the tests describe what the app does today.
+2. PR #4, rebased on this: its four-finger fix moves into the recognizer with a
+   regression test, and CI compiles and tests the whole PR.
 3. PR: `os_log` events + `TESTING-CHECKLIST.md` (G).
 4. Optional, later: frame recorder and fixtures (C); self-hosted e2e runner (E).
