@@ -23,7 +23,7 @@ final class SwipeGridOverlayController {
     private var displayID: String?
 
     func show(grid: SpaceGrid, manager: SpaceManager) {
-        guard let screen = screen(for: manager.selectedDisplayID) else { return }
+        guard let screen = manager.screen(forDisplayUUID: manager.selectedDisplayID) else { return }
         dismissal?.cancel()
         displayID = manager.selectedDisplayID
         update(grid: grid, manager: manager)
@@ -84,14 +84,6 @@ final class SwipeGridOverlayController {
         panel.contentView = NSHostingView(rootView: SwipeGridOverlayView(presentation: presentation))
         self.panel = panel
         return panel
-    }
-
-    private func screen(for display: String) -> NSScreen? {
-        NSScreen.screens.first { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-                  let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue() else { return false }
-            return CFUUIDCreateString(nil, uuid) as String == display
-        }
     }
 }
 
@@ -158,7 +150,7 @@ private struct SwipeGridOverlayView: View {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                             .font(.system(size: 10, weight: .medium))
                     }
-                    Text("\(info.index + 1)")
+                    Text("\(info.number)")
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
                 }
                 .foregroundStyle(selected ? Color.black.opacity(0.8) : Color.white.opacity(0.8))

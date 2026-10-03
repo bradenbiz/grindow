@@ -7,7 +7,9 @@ sh Scripts/build-local.sh
 ```
 
 The output is `build/Grindow.app`. Quit the running copy before reopening it.
-Xcode's Debug and Release configurations also use the same manual signing identity.
+Xcode builds use the same identity once setup has written the git-ignored
+`Config/Signing.local.xcconfig`. Without that file (a fresh clone, CI), the project
+falls back to ad-hoc signing from `Config/Signing.xcconfig` so it still builds.
 Do not re-sign with `codesign --sign -`: ad-hoc signing changes the app's designated
 requirement between builds and breaks Accessibility permission continuity.
 
@@ -18,7 +20,9 @@ sh Scripts/setup-local-signing.sh
 ```
 
 This creates **Grindow Local Development**, a ten-year self-signed code-signing
-certificate, and imports its private key into the default user keychain. Trust is
+certificate, imports its private key into the default user keychain, and writes
+`Config/Signing.local.xcconfig` so Xcode signs with it too. Re-run it after a fresh
+clone to restore that file. Trust is
 limited to code signing in the user's trust settings. Temporary key/export files
 are removed. Only `/usr/bin/codesign` is preauthorized to use the imported key;
 macOS may still ask for Keychain authorization when it is first used. Choose

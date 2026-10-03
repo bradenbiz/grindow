@@ -27,14 +27,24 @@ struct ThreeFingerSwipeRecognizer {
 
     private(set) var isTracking = false
     private var swipeEmittedForCurrentGesture = false
+    /// Set once more than three fingers touch; cleared only when every finger
+    /// lifts. Fingers land and lift at slightly different times, so a
+    /// four-finger gesture passes through three fingers and must not count.
+    private(set) var gestureHadExtraFingers = false
     private var startPositions: [Int32: (x: Float, y: Float)] = [:]
     private var currentPositions: [Int32: (x: Float, y: Float)] = [:]
     private var activeFingerIds: Set<Int32> = []
 
     /// Feed one frame of in-contact fingers.
     mutating func process(_ contacts: [TouchPoint]) -> Event? {
-        guard contacts.count == Self.fingerCount else {
-            if isTracking { reset() }
+        if contacts.isEmpty {
+            gestureHadExtraFingers = false
+        } else if contacts.count > Self.fingerCount {
+            gestureHadExtraFingers = true
+        }
+
+        guard contacts.count == Self.fingerCount, !gestureHadExtraFingers else {
+            if isTracking { resetTracking() }
             return nil
         }
 
@@ -56,7 +66,14 @@ struct ThreeFingerSwipeRecognizer {
         return .swipe(direction)
     }
 
+    /// Forget everything, including a four-finger gesture in progress. For
+    /// when frames stopped arriving (interceptor stopped or tap re-enabled).
     mutating func reset() {
+        resetTracking()
+        gestureHadExtraFingers = false
+    }
+
+    private mutating func resetTracking() {
         isTracking = false
         swipeEmittedForCurrentGesture = false
         activeFingerIds.removeAll()
@@ -65,7 +82,7 @@ struct ThreeFingerSwipeRecognizer {
     }
 
     private mutating func begin(_ contacts: [TouchPoint], ids: Set<Int32>) {
-        reset()
+        resetTracking()
         isTracking = true
         activeFingerIds = ids
         for contact in contacts {

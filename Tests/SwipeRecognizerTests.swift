@@ -54,6 +54,25 @@ final class SwipeRecognizerTests: XCTestCase {
         XCTAssertEqual(run([four, moved(four, dy: 0.2)]), [])
     }
 
+    func testFourFingerGestureNeverCountsAsThree() {
+        let four = rest + [TouchPoint(id: 4, x: 0.7, y: 0.5)]
+        var recognizer = ThreeFingerSwipeRecognizer()
+        // Fingers land unevenly (3 then 4), swipe, and lift unevenly (4 then 3).
+        let frames = [rest, four, moved(four, dy: 0.2), moved(rest, dy: 0.2), moved(rest, dy: 0.4)]
+        XCTAssertEqual(run(frames, recognizer: &recognizer), [.began])
+        XCTAssertTrue(recognizer.gestureHadExtraFingers)
+        // Still ignored with one finger left; a real three-finger swipe works once all lift.
+        XCTAssertEqual(run([Array(rest.prefix(1)), rest, moved(rest, dy: 0.2)], recognizer: &recognizer), [])
+        XCTAssertEqual(run([[], rest, moved(rest, dy: 0.2)], recognizer: &recognizer), [.began, .swipe(.up)])
+    }
+
+    func testResetClearsFourFingerLatch() {
+        var recognizer = ThreeFingerSwipeRecognizer()
+        _ = recognizer.process(rest + [TouchPoint(id: 4, x: 0.7, y: 0.5)])
+        recognizer.reset()
+        XCTAssertEqual(run([rest, moved(rest, dy: 0.2)], recognizer: &recognizer), [.began, .swipe(.up)])
+    }
+
     func testLiftingAndTouchingAgainStartsANewGesture() {
         var recognizer = ThreeFingerSwipeRecognizer()
         XCTAssertEqual(run([rest, moved(rest, dy: 0.1), []], recognizer: &recognizer), [.began, .swipe(.up)])

@@ -18,6 +18,17 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(DisplaySpaces.parse([missing], connected: ["external": "External"], mainDisplayID: "main").first?.currentSpaceID, 0)
     }
 
+    func testDesktopLabelsSkipFullScreenSpaces() {
+        func entry(_ id: UInt64, _ type: Int = 0) -> [String: Any] { ["id64": id, "type": type] }
+        let roster: [[String: Any]] = [
+            ["Display Identifier": "Main", "Spaces": [entry(1), entry(2, 4), entry(3)], "Current Space": ["id64": 1]]
+        ]
+        let spaces = DisplaySpaces.parse(roster, connected: ["main": "Built-in"], mainDisplayID: "main")[0].spaces
+        XCTAssertEqual(spaces.map(\.label), ["Desktop 1", "Full Screen 1", "Desktop 2"])
+        XCTAssertEqual(spaces.map(\.number), [1, 1, 2])
+        XCTAssertEqual(spaces.map(\.index), [0, 1, 2])
+    }
+
     func testGridDoesNotLoseSpacesAndRoutesVerticalAndWrap() {
         let grid = SpaceGrid()
         grid.arrange(spaceIDs: [1, 2, 3, 4, 5, 6, 7], rows: 2, columns: 3)
@@ -34,6 +45,19 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(AppSettings.reconcile(saved: [3, 1, 0, 99, 1], liveIDs: [1, 2, 3, 4]), [3, 1, 2, 4])
         XCTAssertEqual(AppSettings.reconcile(saved: [99, 0], liveIDs: []), [])
         XCTAssertEqual(AppSettings.reconcile(saved: [], liveIDs: [8, 9]), [8, 9])
+    }
+
+    func testColumnChangeKeepsSpacesInTheirRowAndColumn() {
+        // 2x3 with Space 6 dragged to row 1, column 0.
+        let saved: [UInt64] = [1, 2, 3, 6, 4, 5]
+        XCTAssertEqual(AppSettings.reflow(saved, from: 3, to: 4), [1, 2, 3, 0, 6, 4, 5, 0])
+        XCTAssertEqual(AppSettings.reflow(AppSettings.reflow(saved, from: 3, to: 4), from: 4, to: 3), saved)
+        // Shrinking drops the cut-off column; reconcile puts those Spaces back in empty cells.
+        let narrowed = AppSettings.reflow(saved, from: 3, to: 2)
+        XCTAssertEqual(narrowed, [1, 2, 6, 4])
+        XCTAssertEqual(AppSettings.reconcile(saved: narrowed, liveIDs: [1, 2, 3, 4, 5, 6]), [1, 2, 6, 4, 3, 5])
+        XCTAssertEqual(AppSettings.reflow([1, 2, 3, 4], from: 3, to: 3), [1, 2, 3, 4])
+        XCTAssertEqual(AppSettings.reflow([1, 2, 3, 4], from: 3, to: 2), [1, 2, 4, 0])
     }
 
     @MainActor
@@ -170,9 +194,25 @@ final class NavigationTests: XCTestCase {
         worker.onFinish = { _ in finished.fulfill() }
         XCTAssertTrue(worker.request(target: 4, display: "A"))
         worker.cancel()
-        XCTAssertFalse(worker.request(target: 2, display: "A"))
         await fulfillment(of: [finished], timeout: 2)
         XCTAssertTrue(backend.posts.isEmpty)
+    }
+
+    @MainActor
+    func testRequestAfterCancelRunsOnceCancelledTaskEnds() async {
+        let backend = Backend()
+        let worker = backend.worker()
+        // Only the replacement reports a finish; the cancelled task is superseded.
+        let finished = expectation(description: "replacement finished")
+        worker.onFinish = { error in XCTAssertNil(error); finished.fulfill() }
+        XCTAssertTrue(worker.request(target: 4, display: "A"))
+        worker.cancel()
+        XCTAssertTrue(worker.request(target: 2, display: "A"))
+        XCTAssertEqual(worker.targetID, 2)
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(backend.posts, [1])
+        XCTAssertEqual(backend.current, 2)
+        XCTAssertNil(worker.targetID)
     }
 }
 

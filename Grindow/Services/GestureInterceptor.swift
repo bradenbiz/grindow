@@ -22,7 +22,8 @@ private let gestureTapCallback: CGEventTapCallBack = { _, type, event, _ in
 ///
 /// Note: this only *detects* swipes — macOS still acts on its built-in
 /// three-finger gestures unless the user disables them in
-/// System Settings → Trackpad → More Gestures.
+/// System Settings → Trackpad → More Gestures. `NativeTrackpadGestures`
+/// reports when that is the case so callers can avoid a double switch.
 class GestureInterceptor: NSObject, ObservableObject {
     static let shared = GestureInterceptor()
 
