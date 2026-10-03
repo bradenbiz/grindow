@@ -4,6 +4,8 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
 
+    @ObservedObject private var permissions = AccessibilityHelper.shared
+
     var body: some View {
         Form {
             Section("Gesture Behavior") {
@@ -27,14 +29,31 @@ struct SettingsView: View {
                         .padding(.leading, 20)
                 }
 
-                Toggle("Invert vertical swipe direction", isOn: $settings.invertVerticalSwipe)
-                Text("Flip if three-finger up moves you down (or vice versa).")
+                Toggle("Invert all swipe directions", isOn: $settings.invertSwipes)
+                Text("Reverse both horizontal and vertical swipes.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.leading, 20)
             }
 
             Divider()
+
+            Section("Space Switching") {
+                Toggle("Show grid after swiping", isOn: $settings.showSwipeGrid)
+                Text("Briefly show your position without interrupting typing or clicks.")
+                    .font(.caption).foregroundColor(.secondary)
+                Picker("Animation", selection: $settings.transitionSpeed) {
+                    ForEach(TransitionSpeed.allCases, id: \.self) { speed in
+                        Text(speed.rawValue.capitalized).tag(speed)
+                    }
+                }
+                Text("Animations move horizontally. Longer grid jumps use instant switching.")
+                    .font(.caption).foregroundColor(.secondary)
+                Text(permissions.isGranted ? "Accessibility access enabled" : "Accessibility access required")
+                Button("Open Accessibility Settings…") { permissions.requestAccessibility() }
+                Text("In Trackpad settings, turn off three-finger Space switching, Mission Control, and App Exposé, or assign them to four fingers.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
 
             Section("General") {
                 Toggle("Enable Grindow", isOn: $settings.isEnabled)
@@ -51,7 +70,7 @@ struct SettingsView: View {
                     Text("Three-finger vertical swipes navigate between rows.")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text("Horizontal swipes work as normal macOS Space switching.")
+                    Text("Horizontal swipes navigate columns. Each display keeps its own grid.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

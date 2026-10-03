@@ -1,240 +1,178 @@
 import Cocoa
 import CoreGraphics
 
-// MARK: - Private CoreGraphics SPI declarations for Space management
-
-/// These are private/undocumented CoreGraphics APIs used by macOS internally
-/// for managing Spaces (virtual desktops). They are stable across macOS versions
-/// but are not part of the public SDK.
-
-private typealias CGSConnectionID = UInt32
-
 @_silgen_name("CGSMainConnectionID")
-private func CGSMainConnectionID() -> CGSConnectionID
-
+private func CGSMainConnectionID() -> UInt32
 @_silgen_name("CGSCopyManagedDisplaySpaces")
-private func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray?
+private func CGSCopyManagedDisplaySpaces(_ connection: UInt32, _ display: CFString?) -> CFArray?
 
-@_silgen_name("CGSGetActiveSpace")
-private func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
-
-@_silgen_name("CGSManagedDisplaySetCurrentSpace")
-private func CGSManagedDisplaySetCurrentSpace(_ connection: CGSConnectionID, _ display: CFString, _ space: UInt64)
-
-// MARK: - DIAG file logger (disabled; multi-monitor / stuck-desktop investigation)
-//
-// Appends to /tmp/grindow-gesture.log. NSLog does NOT reliably reach the unified
-// log for this app, so a file logger is used instead. To re-enable the switch/
-// roster tracing, uncomment this helper plus the `// DIAG:` blocks in
-// refreshSpaces() and switchToSpace(id:) and the `diagLastRoster` property below.
-//
-// private let gdiagPath = "/tmp/grindow-gesture.log"
-// func gdiag(_ msg: String) {
-//     guard let data = (msg + "\n").data(using: .utf8) else { return }
-//     if let fh = FileHandle(forWritingAtPath: gdiagPath) {
-//         fh.seekToEndOfFile(); fh.write(data); try? fh.close()
-//     } else {
-//         try? data.write(to: URL(fileURLWithPath: gdiagPath))
-//     }
-// }
-
-// MARK: - Space information
-
-struct SpaceInfo: Identifiable, Equatable {
-    let id: UInt64
-    let index: Int          // 0-based index in the spaces list
-    let type: SpaceType
-    let displayUUID: String
-    var label: String       // User-visible label (e.g., "Desktop 1", app name for fullscreen)
-
-    enum SpaceType: Int {
-        case desktop = 0    // Regular desktop space
-        case fullscreen = 4 // Full-screen application space
-        case unknown = -1
-    }
-}
-
-// MARK: - SpaceManager
-
-/// Manages detection and switching of macOS Spaces using private CoreGraphics APIs.
+@MainActor
 class SpaceManager: ObservableObject {
     static let shared = SpaceManager()
+    @Published private(set) var displays: [DisplaySpaces] = []
+    @Published private(set) var spaces: [SpaceInfo] = []
+    @Published private(set) var activeSpaceID: UInt64 = 0
+    @Published private(set) var selectedDisplayID = ""
+    @Published private(set) var isSwitching = false
+    @Published var lastError: String?
+    var onChange: (() -> Void)?
+    private var observers: [NSObjectProtocol] = []
 
-    @Published var spaces: [SpaceInfo] = []
-    @Published var activeSpaceID: UInt64 = 0
-
-    private var connection: CGSConnectionID = 0
-    private var spaceChangeObserver: NSObjectProtocol?
-    // private var diagLastRoster: [UInt64] = []  // DIAG
+    private lazy var coordinator: SpaceSwitchCoordinator = {
+        let worker = SpaceSwitchCoordinator(snapshot: { [weak self] id in
+            self?.readDisplays().first { $0.id == id }
+        }, post: { [weak self] right, display, steps in
+            guard let self else { throw SpaceSwitchCoordinator.Failure.unavailable }
+            try await self.postSwipe(right: right, display: display, steps: steps)
+        })
+        worker.onProgress = { [weak self] in self?.refreshSpaces(); self?.onChange?() }
+        worker.onFinish = { [weak self] error in
+            guard let self else { return }
+            self.isSwitching = false
+            self.lastError = error?.localizedDescription
+            self.refreshSpaces()
+            self.onChange?()
+        }
+        return worker
+    }()
 
     private init() {
-        connection = CGSMainConnectionID()
         refreshSpaces()
-        startObservingSpaceChanges()
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshSpaces(); self?.onChange?() }
+        })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelSwitching(); self?.refreshSpaces(); self?.onChange?() }
+        })
     }
 
-    deinit {
-        if let observer = spaceChangeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(observer)
-        }
+    private func uuid(for id: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String
     }
 
-    // MARK: - Space Detection
-
-    /// UUID strings of all displays currently connected, matching the format of
-    /// CGS's "Display Identifier". Uses public CoreGraphics APIs.
-    private func connectedDisplayUUIDs() -> Set<String> {
-        var count: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
-
-        var uuids = Set<String>()
-        for id in ids {
-            guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { continue }
-            uuids.insert(CFUUIDCreateString(nil, cf) as String)
-        }
-        return uuids
+    private func screenID(_ screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 
-    /// Refreshes the list of all spaces from the system.
-    func refreshSpaces() {
-        guard let displaySpaces = CGSCopyManagedDisplaySpaces(connection) as? [[String: Any]] else {
-            return
-        }
-
-        var detectedSpaces: [SpaceInfo] = []
-        var globalIndex = 0
-
-        // Only include displays that are physically connected right now. macOS
-        // retains Space arrangements for displays you've previously attached
-        // (external monitors), and CGSCopyManagedDisplaySpaces returns those
-        // "ghost" displays too. Their spaces can't be switched to or detected as
-        // active, so filtering them out is required for correct navigation.
-        let connected = connectedDisplayUUIDs()
-
-        for displayInfo in displaySpaces {
-            let displayUUID = displayInfo["Display Identifier"] as? String ?? "Unknown"
-            // Keep the display if it's connected. If we couldn't resolve any
-            // connected UUIDs (unexpected), fall back to including everything.
-            if !connected.isEmpty && !connected.contains(displayUUID) { continue }
-            guard let spacesArray = displayInfo["Spaces"] as? [[String: Any]] else { continue }
-
-            for spaceDict in spacesArray {
-                guard let spaceID = spaceDict["ManagedSpaceID"] as? UInt64 ?? spaceDict["id64"] as? UInt64 else {
-                    continue
-                }
-
-                let typeRaw = spaceDict["type"] as? Int ?? -1
-                // Skip phantom entries — only real desktop (0) and fullscreen (4) spaces
-                // should appear in the grid. Other type values are tiles, dashboards,
-                // and other system-internal entries.
-                guard typeRaw == 0 || typeRaw == 4 else { continue }
-                let type = SpaceInfo.SpaceType(rawValue: typeRaw) ?? .unknown
-
-                let autoLabel: String
-                if type == .fullscreen {
-                    autoLabel = "Full Screen \(globalIndex + 1)"
-                } else {
-                    autoLabel = "Desktop \(globalIndex + 1)"
-                }
-                let label = AppSettings.shared.customName(forSpaceID: spaceID) ?? autoLabel
-
-                let info = SpaceInfo(
-                    id: spaceID,
-                    index: globalIndex,
-                    type: type,
-                    displayUUID: displayUUID,
-                    label: label
-                )
-                detectedSpaces.append(info)
-                globalIndex += 1
+    private func readDisplays() -> [DisplaySpaces] {
+        guard strafe_cgs_available(),
+              let roster = CGSCopyManagedDisplaySpaces(CGSMainConnectionID(), nil) as? [[String: Any]] else { return [] }
+        var connected: [String: String] = [:]
+        for (index, screen) in NSScreen.screens.enumerated() {
+            if let number = screenID(screen), let id = uuid(for: number) {
+                connected[id] = "\(index + 1): \(screen.localizedName)"
             }
         }
-
-        // Assign synchronously. All callers (init, the space-change observer,
-        // and the popover refresh) run on the main thread, and downstream setup
-        // (grid arrangement) reads `spaces` synchronously right after calling
-        // this — deferring the assignment onto the run loop left the grid empty
-        // at launch. Guard the thread just in case a future caller is off-main.
-        let apply = {
-            self.spaces = detectedSpaces
-            self.activeSpaceID = CGSGetActiveSpace(self.connection)
-        }
-        if Thread.isMainThread {
-            apply()
-        } else {
-            DispatchQueue.main.sync(execute: apply)
-        }
-
-        // DIAG: dump the roster whenever it changes so we can see exactly what
-        // each cell (esp. "Desktop 1") maps to. Disabled — see gdiag helper above.
-        // let roster = detectedSpaces.map { $0.id }
-        // if roster != diagLastRoster {
-        //     diagLastRoster = roster
-        //     let active = CGSGetActiveSpace(connection)
-        //     gdiag("ROSTER (active=\(active)):")
-        //     for s in detectedSpaces {
-        //         gdiag("  idx=\(s.index) id=\(s.id) type=\(s.type.rawValue) display=\(s.displayUUID) label=\(s.label)")
-        //     }
-        // }
+        return DisplaySpaces.parse(roster, connected: connected, mainDisplayID: uuid(for: CGMainDisplayID()) ?? "")
     }
 
-    /// Returns the active space ID.
+    func refreshSpaces() {
+        displays = readDisplays()
+        if !displays.contains(where: { $0.id == selectedDisplayID }) {
+            selectedDisplayID = displays.first?.id ?? ""
+        }
+        let selected = displays.first { $0.id == selectedDisplayID }
+        spaces = (selected?.spaces ?? []).map { info in
+            var copy = info
+            copy.label = AppSettings.shared.customName(forSpaceID: info.id) ?? info.label
+            return copy
+        }
+        activeSpaceID = selected?.currentSpaceID ?? 0
+    }
+
+    func selectDisplay(_ id: String) {
+        guard displays.contains(where: { $0.id == id }), id != selectedDisplayID else { return }
+        selectedDisplayID = id
+        refreshSpaces()
+        onChange?()
+    }
+
+    /// Called once when raw touch tracking begins, so the gesture keeps its display.
+    func selectCursorDisplay() {
+        guard let point = CGEvent(source: nil)?.location else { return }
+        for screen in NSScreen.screens {
+            if let number = screenID(screen), CGDisplayBounds(number).contains(point), let id = uuid(for: number) {
+                selectDisplay(id)
+                return
+            }
+        }
+    }
+
     func getActiveSpaceID() -> UInt64 {
-        activeSpaceID = CGSGetActiveSpace(connection)
+        refreshSpaces()
         return activeSpaceID
     }
 
-    // MARK: - Space Switching
-
-    /// Switches to a space by its ID via the private
-    /// `CGSManagedDisplaySetCurrentSpace` SPI. Instant; no keyboard
-    /// simulation, no dependency on user-bound shortcuts.
-    func switchToSpace(id targetSpaceID: UInt64) {
-        guard targetSpaceID != activeSpaceID else { return }   // DIAG: gdiag("switch SKIP …")
-        guard let target = spaces.first(where: { $0.id == targetSpaceID }) else { return }  // DIAG: gdiag("switch ABORT …")
-
-        let displayUUID = target.displayUUID as CFString
-        CGSManagedDisplaySetCurrentSpace(connection, displayUUID, targetSpaceID)
-
-        // DIAG: trace the switch and whether it actually took (main-display only).
-        // let preActive = CGSGetActiveSpace(connection)
-        // gdiag("switch CALL target=\(targetSpaceID) type=\(target.type.rawValue) display=\(target.displayUUID) pre=\(preActive)")
-        // DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-        //     guard let self = self else { return }
-        //     let post = CGSGetActiveSpace(self.connection)
-        //     gdiag("switch RESULT target=\(targetSpaceID) post=\(post) \(post == targetSpaceID ? "OK" : "FAILED")")
-        // }
-
-        // The activeSpaceDidChangeNotification observer will reconcile
-        // `activeSpaceID` once macOS finishes the transition. Update
-        // optimistically so the UI reflects the new state immediately.
-        activeSpaceID = targetSpaceID
+    var navigationSpaceID: UInt64 {
+        coordinator.displayID == selectedDisplayID ? (coordinator.targetID ?? activeSpaceID) : activeSpaceID
     }
 
-    /// Switches to the space at the given grid position using the SpaceGrid.
-    func switchToSpace(at position: GridPosition, in grid: SpaceGrid) {
-        guard let targetID = grid.spaceID(at: position) else { return }
-        switchToSpace(id: targetID)
-        grid.currentPosition = position
-    }
-
-    // MARK: - Space Change Observation
-
-    private func startObservingSpaceChanges() {
-        spaceChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleSpaceChange()
+    @discardableResult
+    func switchToSpace(id target: UInt64) -> Bool {
+        guard AccessibilityHelper.shared.isAccessibilityGranted else {
+            lastError = "Grant Accessibility access in Settings to switch Spaces."
+            return false
         }
+        guard !strafe_is_expose_active() else {
+            lastError = "Close Mission Control or App Exposé before navigating the grid."
+            return false
+        }
+        guard coordinator.request(target: target, display: selectedDisplayID) else {
+            lastError = "Finish switching on the other display, or refresh the selected Space."
+            return false
+        }
+        lastError = nil
+        isSwitching = true
+        return true
     }
 
-    private func handleSpaceChange() {
-        activeSpaceID = CGSGetActiveSpace(connection)
-        // Also refresh spaces in case spaces were added/removed
-        refreshSpaces()
+    func switchToSpace(at position: GridPosition, in grid: SpaceGrid) {
+        guard let id = grid.spaceID(at: position) else { return }
+        switchToSpace(id: id)
+    }
+
+    func cancelSwitching() { coordinator.cancel() }
+
+    private func postSwipe(right: Bool, display: String, steps: Int) async throws {
+        guard AccessibilityHelper.shared.isAccessibilityGranted, !strafe_is_expose_active(),
+              let screen = NSScreen.screens.first(where: { screen in
+                  screenID(screen).flatMap { uuid(for: $0) } == display
+              }), let number = screenID(screen) else { throw SpaceSwitchCoordinator.Failure.unavailable }
+        let bounds = CGDisplayBounds(number)
+        let point = CGPoint(x: bounds.midX, y: bounds.midY)
+        let speed = AppSettings.shared.transitionSpeed
+        if steps > 1 || speed == .instant {
+            // A synchronous C loop posts the whole route before yielding. Verify
+            // only after posting; do not deliberately present each intermediate Space.
+            guard steps > 0, steps <= 128,
+                  strafe_post_switch_gestures(right ? StrafeDirectionRight : StrafeDirectionLeft, UInt32(steps), point) else {
+                throw SpaceSwitchCoordinator.Failure.postFailed
+            }
+            return
+        }
+        let sign: Double = right ? 1 : -1
+        guard strafe_post_dock_swipe_phase(1, 0, 0, point) else { throw SpaceSwitchCoordinator.Failure.postFailed }
+        do {
+            for step in 1...6 {
+                try Task.checkCancellation()
+                let fraction = Double(step) / 6
+                guard strafe_post_dock_swipe_phase(2, sign * 0.35 * fraction, sign * 130 * fraction, point) else {
+                    throw SpaceSwitchCoordinator.Failure.postFailed
+                }
+                try await Task.sleep(nanoseconds: speed.rampNanoseconds / 6)
+            }
+            guard strafe_post_dock_swipe_phase(4, sign * 0.35, sign * 130, point) else {
+                throw SpaceSwitchCoordinator.Failure.postFailed
+            }
+        } catch {
+            // Always close a started gesture, including cancellation on disable/unplug.
+            _ = strafe_post_dock_swipe_phase(8, 0, 0, point)
+            throw error
+        }
     }
 }

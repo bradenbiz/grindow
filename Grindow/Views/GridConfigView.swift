@@ -15,6 +15,9 @@ struct GridConfigView: View {
     var body: some View {
         VStack(spacing: 16) {
             headerSection
+            Picker("Display", selection: Binding(get: { spaceManager.selectedDisplayID }, set: { spaceManager.selectDisplay($0) })) {
+                ForEach(spaceManager.displays) { display in Text(display.name).tag(display.id) }
+            }
             gridDimensionControls
             gridView
             legendSection
@@ -89,9 +92,9 @@ struct GridConfigView: View {
 
     private var gridView: some View {
         VStack(spacing: 4) {
-            ForEach(0..<settings.gridRows, id: \.self) { row in
+            ForEach(0..<spaceGrid.rows, id: \.self) { row in
                 HStack(spacing: 4) {
-                    ForEach(0..<settings.gridColumns, id: \.self) { col in
+                    ForEach(0..<spaceGrid.columns, id: \.self) { col in
                         gridCell(row: row, col: col)
                     }
                 }
@@ -237,23 +240,26 @@ struct GridConfigView: View {
         spaceGrid.updateCurrentPosition(forSpaceID: activeID)
 
         // Save layout
-        settings.gridLayout = spaceIDs
+        settings.displayLayouts[spaceManager.selectedDisplayID] = spaceGrid.grid.flatMap { $0 }
     }
 
     private func handleDrop(providers: [NSItemProvider], at position: GridPosition) -> Bool {
         guard let provider = providers.first else { return false }
+        let displayID = spaceManager.selectedDisplayID
         provider.loadItem(forTypeIdentifier: "public.plain-text", options: nil) { item, _ in
             guard let data = item as? Data,
                   let text = String(data: data, encoding: .utf8),
                   let sourceID = UInt64(text) else { return }
 
             DispatchQueue.main.async {
+                guard spaceManager.selectedDisplayID == displayID else { return }
                 // Find source position
                 for r in 0..<spaceGrid.rows {
                     for c in 0..<spaceGrid.columns {
                         let pos = GridPosition(row: r, column: c)
                         if spaceGrid.spaceID(at: pos) == sourceID {
                             spaceGrid.moveSpace(from: pos, to: position)
+                            settings.displayLayouts[spaceManager.selectedDisplayID] = spaceGrid.grid.flatMap { $0 }
                             return
                         }
                     }

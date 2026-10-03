@@ -63,7 +63,10 @@ private func MTDeviceRelease(_ device: MTDeviceRef)
 // MARK: - C callback (cannot capture)
 
 private let multitouchCallback: MTContactFrameCallback = { _, rawPtr, nTouches, timestamp, frame in
-    guard let rawPtr = rawPtr, nTouches > 0 else { return 0 }
+    guard nTouches > 0, let rawPtr else {
+        DispatchQueue.main.async { GestureInterceptor.shared.handleTouchFrame(touches: [], timestamp: timestamp, frame: frame) }
+        return 0
+    }
     let typedPtr = rawPtr.assumingMemoryBound(to: MTTouch.self)
     let buffer = UnsafeBufferPointer(start: typedPtr, count: Int(nTouches))
     let touches = Array(buffer)
@@ -88,6 +91,7 @@ class GestureInterceptor: ObservableObject {
     @Published var isActive: Bool = false
 
     /// Called when a three-finger swipe is detected in any of the four directions.
+    var onGestureBegan: (() -> Void)?
     var onSwipe: ((SwipeDirection) -> Void)?
 
     // MARK: - Tunables
@@ -153,9 +157,10 @@ class GestureInterceptor: ObservableObject {
     // MARK: - Frame handling
 
     fileprivate func handleTouchFrame(touches: [MTTouch], timestamp: Double, frame: Int32) {
+        guard device != nil else { return }
         let inContact = touches.filter { $0.state == 4 }
 
-        guard inContact.count >= minFingerCount else {
+        guard inContact.count == minFingerCount else {
             if isTracking { resetTracking() }
             return
         }
@@ -184,6 +189,7 @@ class GestureInterceptor: ObservableObject {
     }
 
     private func beginTracking(touches: [MTTouch], ids: Set<Int32>) {
+        onGestureBegan?()
         isTracking = true
         swipeEmittedForCurrentGesture = false
         activeFingerIds = ids
@@ -228,11 +234,7 @@ class GestureInterceptor: ObservableObject {
         if absDY >= minAxialDelta && absDY >= absDX * minAxialDominance {
             // MT normalized coords: y=0 is near the user, y=1 is far.
             // Fingers moving away from the user → avgDY > 0 → swipe up.
-            var d: SwipeDirection = avgDY > 0 ? .up : .down
-            if AppSettings.shared.invertVerticalSwipe {
-                d = (d == .up) ? .down : .up
-            }
-            direction = d
+            direction = avgDY > 0 ? .up : .down
         } else if absDX >= minAxialDelta && absDX >= absDY * minAxialDominance {
             // MT normalized coords: x=0 is left, x=1 is right.
             // Fingers moving right → avgDX > 0 → swipe right.
@@ -242,6 +244,6 @@ class GestureInterceptor: ObservableObject {
         }
 
         swipeEmittedForCurrentGesture = true
-        onSwipe?(direction)
+        onSwipe?(AppSettings.shared.invertSwipes ? direction.reversed : direction)
     }
 }

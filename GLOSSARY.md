@@ -16,9 +16,13 @@ around one.
 
 ## Notes
 
-- Grindow switches spaces with the private `CGSManagedDisplaySetCurrentSpace` SPI —
-  an instant switch that bypasses the WindowServer's normal space transition (hence
-  no animation, and some redraw quirks under investigation).
+- Grindow switches Spaces by synthesizing Dock-swipe gestures through macOS's
+  native transition path (adapted from Strafe). Nonadjacent grid destinations post a burst of
+  adjacent gestures and verify the final destination. Quick/Smooth animations are horizontal.
+- Each display has its own roster, current Space, and grid layout. The active cell
+  reflects observed macOS state; a pending destination is used only to route rapid
+  input. The display under the pointer at gesture start is selected for navigation.
+- Accessibility permission is required to post synthetic gestures.
 - Grindow only **detects** trackpad gestures; macOS still acts on its own three-finger
   gestures unless they're disabled in System Settings → Trackpad → More Gestures.
 - Only spaces on **currently-connected displays** are shown; macOS retains space

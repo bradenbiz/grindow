@@ -8,6 +8,8 @@ struct MenuBarView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var gestureInterceptor: GestureInterceptor
 
+    @ObservedObject private var permissions = AccessibilityHelper.shared
+
     var onOpenSettings: () -> Void
     var onOpenGridConfig: () -> Void
     var onQuit: () -> Void
@@ -15,7 +17,17 @@ struct MenuBarView: View {
     var body: some View {
         VStack(spacing: 12) {
             headerSection
+            Picker("Display", selection: Binding(get: { spaceManager.selectedDisplayID }, set: { spaceManager.selectDisplay($0) })) {
+                ForEach(spaceManager.displays) { display in Text(display.name).tag(display.id) }
+            }
             miniGrid
+            if !permissions.isGranted {
+                Button("Enable Accessibility…") { permissions.requestAccessibility() }
+            }
+            if spaceManager.isSwitching { Text("Switching…").font(.caption) }
+            if let error = spaceManager.lastError {
+                Text(error).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             controlsSection
             footerSection
         }
@@ -63,7 +75,7 @@ struct MenuBarView: View {
     private func miniGridCell(row: Int, col: Int) -> some View {
         let position = GridPosition(row: row, column: col)
         let hasSpace = spaceGrid.spaceID(at: position) != nil
-        let isCurrent = spaceGrid.currentPosition == position && hasSpace
+        let isCurrent = spaceGrid.spaceID(at: position) == spaceManager.activeSpaceID && hasSpace
         let spaceInfo = spaceGrid.spaceID(at: position).flatMap { id in
             spaceManager.spaces.first(where: { $0.id == id })
         }
@@ -71,7 +83,6 @@ struct MenuBarView: View {
         return Button(action: {
             if let targetID = spaceGrid.spaceID(at: position) {
                 spaceManager.switchToSpace(id: targetID)
-                spaceGrid.currentPosition = position
             }
         }) {
             ZStack {
@@ -85,6 +96,7 @@ struct MenuBarView: View {
                 }
             }
         }
+        .disabled(!hasSpace || !permissions.isGranted)
         .buttonStyle(.plain)
         .frame(width: 36, height: 28)
         .help(spaceInfo?.label ?? "Empty")
@@ -104,7 +116,7 @@ struct MenuBarView: View {
 
     private var controlsSection: some View {
         VStack(spacing: 6) {
-            Toggle("Enable Vertical Swipes", isOn: $settings.isEnabled)
+            Toggle("Enable Grindow", isOn: $settings.isEnabled)
                 .toggleStyle(.switch)
                 .controlSize(.small)
 

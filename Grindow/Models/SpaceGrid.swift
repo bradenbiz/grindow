@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 enum EdgeBehavior: String, Codable, CaseIterable {
     case stop = "stop"
@@ -24,6 +25,15 @@ enum EdgeBehavior: String, Codable, CaseIterable {
 
 enum SwipeDirection {
     case up, down, left, right
+
+    var reversed: SwipeDirection {
+        switch self {
+        case .up: return .down
+        case .down: return .up
+        case .left: return .right
+        case .right: return .left
+        }
+    }
 }
 
 struct GridPosition: Equatable, Codable, Hashable {
@@ -45,14 +55,14 @@ class SpaceGrid: ObservableObject {
     /// Arranges detected spaces into a grid with the given dimensions.
     func arrange(spaceIDs: [UInt64], rows: Int, columns: Int) {
         self.allSpaceIDs = spaceIDs
-        self.rows = max(1, rows)
+        self.rows = max(1, rows, (spaceIDs.count + max(1, columns) - 1) / max(1, columns))
         self.columns = max(1, columns)
 
         var grid: [[UInt64]] = []
         var index = 0
-        for r in 0..<self.rows {
+        for _ in 0..<self.rows {
             var row: [UInt64] = []
-            for c in 0..<self.columns {
+            for _ in 0..<self.columns {
                 if index < spaceIDs.count {
                     row.append(spaceIDs[index])
                     index += 1
@@ -68,7 +78,8 @@ class SpaceGrid: ObservableObject {
     /// Returns the space ID at the given grid position, or nil if out of bounds or empty.
     func spaceID(at position: GridPosition) -> UInt64? {
         guard position.row >= 0, position.row < rows,
-              position.column >= 0, position.column < columns else {
+              position.column >= 0, position.column < columns,
+              position.row < grid.count, position.column < grid[position.row].count else {
             return nil
         }
         let id = grid[position.row][position.column]
@@ -125,21 +136,23 @@ class SpaceGrid: ObservableObject {
         }
     }
 
-    /// Updates the current position based on a known active space ID.
-    func updateCurrentPosition(forSpaceID spaceID: UInt64) {
-        for r in 0..<rows {
-            for c in 0..<columns {
-                if r < grid.count && c < grid[r].count && grid[r][c] == spaceID {
-                    currentPosition = GridPosition(row: r, column: c)
-                    return
-                }
-            }
+    func position(forSpaceID id: UInt64) -> GridPosition? {
+        guard id != 0 else { return nil }
+        for (row, cells) in grid.enumerated() {
+            if let column = cells.firstIndex(of: id) { return GridPosition(row: row, column: column) }
         }
+        return nil
+    }
+
+    func updateCurrentPosition(forSpaceID id: UInt64) {
+        currentPosition = position(forSpaceID: id) ?? GridPosition(row: -1, column: -1)
     }
 
     /// Moves a space from one grid position to another (for drag-and-drop rearrangement).
     func moveSpace(from source: GridPosition, to destination: GridPosition) {
-        guard let sourceID = spaceID(at: source) else { return }
+        guard destination.row >= 0, destination.row < grid.count,
+              destination.column >= 0, destination.column < grid[destination.row].count,
+              let sourceID = spaceID(at: source) else { return }
         let destID = grid[destination.row][destination.column]
 
         grid[source.row][source.column] = destID

@@ -8,6 +8,7 @@ import SwiftUI
 /// - Initializes and connects the gesture interceptor, space manager, and grid
 /// - Handles swipe events and translates them into space switches
 /// - Manages the settings and grid configuration windows
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Components
@@ -16,6 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let gestureInterceptor = GestureInterceptor.shared
     private let settings = AppSettings.shared
     private let spaceGrid = SpaceGrid()
+    private let swipeOverlay = SwipeGridOverlayController()
 
     // MARK: - UI
 
@@ -37,6 +39,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        swipeOverlay.hide()
+        spaceManager.cancelSwitching()
         gestureInterceptor.stop()
     }
 
@@ -109,61 +113,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Space Grid
 
     private func setupSpaceGrid() {
+        spaceManager.onChange = { [weak self] in self?.rebuildGrid() }
         rebuildGrid()
-        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.getActiveSpaceID())
-
-        // Keep the grid in sync as spaces are switched, added, or removed.
-        NotificationCenter.default.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.syncGridToSystem()
-        }
+        settings.$gridRows.combineLatest(settings.$gridColumns)
+            .debounce(for: .milliseconds(30), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.rebuildGrid() }.store(in: &cancellables)
     }
 
-    /// Pulls the latest spaces from the system and reconciles the grid: rebuilds
-    /// membership if the set changed, then updates the current position. Cheap
-    /// enough to call on every space change and whenever the popover opens, so
-    /// the grid is always current without any manual "refresh".
     private func syncGridToSystem() {
         spaceManager.refreshSpaces()
-        let live = Set(spaceManager.spaces.map { $0.id })
-        let known = Set(spaceGrid.allSpaceIDs.filter { $0 != 0 })
-        if live != known {
-            rebuildGrid()
-        }
-        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.getActiveSpaceID())
+        rebuildGrid()
     }
 
-    /// (Re)arranges the grid from the current spaces, preferring a saved layout
-    /// only when all of its IDs still correspond to real spaces.
     private func rebuildGrid() {
-        let spaceIDs = spaceManager.spaces.map { $0.id }
-        guard !spaceIDs.isEmpty else { return }  // never persist an empty grid
-        let currentSet = Set(spaceIDs)
-
-        // Discard a saved layout if any of its IDs no longer correspond to a
-        // real space — happens after our phantom-space filter kicks in, or
-        // when the user adds/removes desktops outside Grindow.
-        let savedNonZero = settings.gridLayout.filter { $0 != 0 }
-        let savedAllValid = !savedNonZero.isEmpty
-            && Set(savedNonZero) == currentSet
-
-        if savedAllValid {
-            spaceGrid.arrange(
-                spaceIDs: settings.gridLayout,
-                rows: settings.gridRows,
-                columns: settings.gridColumns
-            )
-        } else {
-            spaceGrid.arrange(
-                spaceIDs: spaceIDs,
-                rows: settings.gridRows,
-                columns: settings.gridColumns
-            )
-            settings.gridLayout = spaceIDs
-        }
+        let ids = spaceManager.spaces.map(\.id)
+        let layout = settings.layout(for: spaceManager.selectedDisplayID, liveIDs: ids)
+        spaceGrid.arrange(spaceIDs: layout, rows: settings.gridRows, columns: settings.gridColumns)
+        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.activeSpaceID)
+        swipeOverlay.update(grid: spaceGrid, manager: spaceManager)
     }
 
     // MARK: - Gesture Interceptor
@@ -173,20 +140,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleSwipe(direction: direction)
         }
 
-        // MultitouchSupport doesn't require Accessibility — only the
-        // keyboard-simulation path for space switching does. Start the
-        // interceptor unconditionally if the user has Grindow enabled.
-        if settings.isEnabled {
-            gestureInterceptor.start()
-        }
-
-        settings.$isEnabled.receive(on: DispatchQueue.main).sink { [weak self] enabled in
-            guard let self = self else { return }
-            if enabled {
-                self.gestureInterceptor.start()
-            } else {
-                self.gestureInterceptor.stop()
-            }
+        gestureInterceptor.onGestureBegan = { [weak self] in self?.spaceManager.selectCursorDisplay() }
+        let permissions = AccessibilityHelper.shared
+        permissions.startMonitoring()
+        settings.$isEnabled.combineLatest(permissions.$isGranted)
+            .receive(on: DispatchQueue.main).sink { [weak self] enabled, granted in
+                guard let self else { return }
+                if enabled && granted {
+                    self.gestureInterceptor.start()
+                } else {
+                    self.gestureInterceptor.stop()
+                    self.spaceManager.cancelSwitching()
+                    self.swipeOverlay.hide()
+                }
+            }.store(in: &cancellables)
+        settings.$showSwipeGrid.sink { [weak self] show in
+            if !show { self?.swipeOverlay.hide() }
         }.store(in: &cancellables)
     }
 
@@ -198,10 +167,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard settings.isEnabled else { return }
 
         // Refresh current position from active space
-        let activeID = spaceManager.getActiveSpaceID()
-        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
-        let current = spaceGrid.currentPosition
+        syncGridToSystem()
+        // Repeated swipes route from the pending destination without falsely
+        // marking it active in the UI before macOS confirms it.
+        let navigationID = spaceManager.navigationSpaceID
+        guard let current = spaceGrid.position(forSpaceID: navigationID) else { return }
 
         let target = spaceGrid.targetPosition(
             from: current,
@@ -211,12 +181,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let targetPosition = target {
             // Valid target — switch to it
-            spaceManager.switchToSpace(at: targetPosition, in: spaceGrid)
+            guard let id = spaceGrid.spaceID(at: targetPosition),
+                  spaceManager.switchToSpace(id: id) else { return }
         } else {
             // At the edge
             if settings.edgeBehavior == .bounce && settings.showBounceAnimation {
                 BounceOverlayController.shared.showBounce(direction: direction)
             }
+        }
+        if settings.showSwipeGrid {
+            swipeOverlay.show(grid: spaceGrid, manager: spaceManager)
         }
     }
 
@@ -225,7 +199,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// On first launch, prompt the user to disable macOS's built-in three-finger
     /// gestures so Grindow's vertical-swipe handler isn't fighting Mission Control.
     private func showFirstRunGuideIfNeeded() {
-        guard !settings.hasShownFirstRunGuide else { return }
+        guard !UserDefaults.standard.bool(forKey: "hasShownNativeSwitchGuide") else { return }
 
         // Defer so the menu bar item shows up first and the alert isn't presented
         // before the rest of the UI is ready.
@@ -235,15 +209,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let alert = NSAlert()
             alert.messageText = "One quick setup step"
             alert.informativeText = """
-            Grindow uses three-finger vertical swipes to navigate your space grid. \
+            Grindow uses three-finger swipes to navigate the grid on the display under your pointer. \
             macOS uses the same gesture for Mission Control and App Exposé by default, \
             so they will fight each other until you turn the built-in versions off.
 
-            In System Settings → Trackpad → More Gestures, set both \
-            "Swipe between full-screen apps" and "Mission Control" to "Off" \
+            In System Settings → Trackpad → More Gestures, set \
+            "Swipe between full-screen apps", "Mission Control", and "App Exposé" to "Off" \
             (or switch them to four fingers).
 
-            Horizontal three-finger swipes will keep working as normal.
+            Enable Accessibility for Grindow in its Settings to allow Space switching.
             """
             alert.alertStyle = .informational
             alert.addButton(withTitle: "Open Trackpad Settings")
@@ -264,6 +238,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             self.settings.hasShownFirstRunGuide = true
+            UserDefaults.standard.set(true, forKey: "hasShownNativeSwitchGuide")
         }
     }
 
@@ -282,7 +257,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Grindow Settings"
         window.styleMask = [.titled, .closable, .resizable]
-        window.setContentSize(NSSize(width: 460, height: 420))
+        window.setContentSize(NSSize(width: 480, height: 580))
         window.center()
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
