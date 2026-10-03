@@ -30,6 +30,10 @@ jobs:
       - name: Swift tests
         run: swift test
 
+      # The recorder only runs on a Mac with a trackpad; make sure it still compiles.
+      - name: Type-check touch recorder
+        run: swiftc -typecheck Scripts/record-touches.swift
+
       - name: Native C tests
         run: sh Scripts/test-native.sh
 
