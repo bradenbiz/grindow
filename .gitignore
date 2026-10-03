@@ -21,3 +21,6 @@ Package.resolved
 .DS_Store
 *.swp
 *~.nib
+
+# Local code-signing override written by Scripts/setup-local-signing.sh
+Config/Signing.local.xcconfig

@@ -59,6 +59,10 @@ class SpaceManager: ObservableObject {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 
+    func screen(forDisplayUUID display: String) -> NSScreen? {
+        NSScreen.screens.first { screenID($0).flatMap { uuid(for: $0) } == display }
+    }
+
     private func readDisplays() -> [DisplaySpaces] {
         guard strafe_cgs_available(),
               let roster = CGSCopyManagedDisplaySpaces(CGSMainConnectionID(), nil) as? [[String: Any]] else { return [] }
@@ -131,18 +135,11 @@ class SpaceManager: ObservableObject {
         return true
     }
 
-    func switchToSpace(at position: GridPosition, in grid: SpaceGrid) {
-        guard let id = grid.spaceID(at: position) else { return }
-        switchToSpace(id: id)
-    }
-
     func cancelSwitching() { coordinator.cancel() }
 
     private func postSwipe(right: Bool, display: String, steps: Int) async throws {
         guard AccessibilityHelper.shared.isAccessibilityGranted, !strafe_is_expose_active(),
-              let screen = NSScreen.screens.first(where: { screen in
-                  screenID(screen).flatMap { uuid(for: $0) } == display
-              }), let number = screenID(screen) else { throw SpaceSwitchCoordinator.Failure.unavailable }
+              let screen = self.screen(forDisplayUUID: display), let number = screenID(screen) else { throw SpaceSwitchCoordinator.Failure.unavailable }
         let bounds = CGDisplayBounds(number)
         let point = CGPoint(x: bounds.midX, y: bounds.midY)
         let speed = AppSettings.shared.transitionSpeed

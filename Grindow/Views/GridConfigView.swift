@@ -240,7 +240,7 @@ struct GridConfigView: View {
         spaceGrid.updateCurrentPosition(forSpaceID: activeID)
 
         // Save layout
-        settings.displayLayouts[spaceManager.selectedDisplayID] = spaceGrid.grid.flatMap { $0 }
+        settings.saveLayout(spaceGrid.grid, for: spaceManager.selectedDisplayID)
     }
 
     private func handleDrop(providers: [NSItemProvider], at position: GridPosition) -> Bool {
@@ -259,7 +259,7 @@ struct GridConfigView: View {
                         let pos = GridPosition(row: r, column: c)
                         if spaceGrid.spaceID(at: pos) == sourceID {
                             spaceGrid.moveSpace(from: pos, to: position)
-                            settings.displayLayouts[spaceManager.selectedDisplayID] = spaceGrid.grid.flatMap { $0 }
+                            settings.saveLayout(spaceGrid.grid, for: spaceManager.selectedDisplayID)
                             return
                         }
                     }

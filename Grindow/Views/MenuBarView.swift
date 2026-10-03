@@ -109,7 +109,7 @@ struct MenuBarView: View {
         if let custom = settings.customName(forSpaceID: info.id) {
             return String(custom.prefix(4))
         }
-        return info.type == .fullscreen ? "⤢\(info.index + 1)" : "\(info.index + 1)"
+        return info.type == .fullscreen ? "⤢\(info.number)" : "\(info.number)"
     }
 
     // MARK: - Controls

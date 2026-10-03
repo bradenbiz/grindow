@@ -166,6 +166,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleSwipe(direction: SwipeDirection) {
         guard settings.isEnabled else { return }
 
+        // macOS acts on its own three-finger swipes too; handling this one as
+        // well would switch Spaces twice.
+        if NativeTrackpadGestures.claims(direction) {
+            spaceManager.lastError = nativeGestureConflictMessage(for: direction)
+            return
+        }
+
         // Refresh current position from active space
         syncGridToSystem()
         // Repeated swipes route from the pending destination without falsely
@@ -194,12 +201,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func nativeGestureConflictMessage(for direction: SwipeDirection) -> String {
+        switch direction {
+        case .left, .right:
+            return "macOS also uses three-finger left/right swipes. In Trackpad settings, turn off \"Swipe between full-screen apps\" or set it to four fingers."
+        case .up, .down:
+            return "macOS also uses three-finger up/down swipes. In Trackpad settings, turn off Mission Control and App Exposé or set them to four fingers."
+        }
+    }
+
     // MARK: - First-Run Guide
 
     /// On first launch, prompt the user to disable macOS's built-in three-finger
     /// gestures so Grindow's vertical-swipe handler isn't fighting Mission Control.
     private func showFirstRunGuideIfNeeded() {
-        guard !UserDefaults.standard.bool(forKey: "hasShownNativeSwitchGuide") else { return }
+        guard !settings.hasShownFirstRunGuide else { return }
 
         // Defer so the menu bar item shows up first and the alert isn't presented
         // before the rest of the UI is ready.
@@ -238,7 +254,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             self.settings.hasShownFirstRunGuide = true
-            UserDefaults.standard.set(true, forKey: "hasShownNativeSwitchGuide")
         }
     }
 

@@ -17,10 +17,35 @@ class AppSettings: ObservableObject {
         didSet { defaults.set(try? JSONEncoder().encode(displayLayouts), forKey: "displayLayouts") }
     }
 
+    /// Column count each display's saved layout was arranged with, so a later
+    /// column change keeps every Space in its row and column.
+    @Published var displayLayoutColumns: [String: Int] = [:] {
+        didSet { defaults.set(try? JSONEncoder().encode(displayLayoutColumns), forKey: "displayLayoutColumns") }
+    }
+
     func layout(for display: String, liveIDs: [UInt64]) -> [UInt64] {
         let legacy: [UInt64] = gridLayout.filter { $0 == 0 || liveIDs.contains($0) }
-        let saved: [UInt64] = displayLayouts[display] ?? legacy
+        var saved: [UInt64] = displayLayouts[display] ?? legacy
+        if let savedColumns = displayLayoutColumns[display] {
+            saved = Self.reflow(saved, from: savedColumns, to: gridColumns)
+        }
         return Self.reconcile(saved: saved, liveIDs: liveIDs)
+    }
+
+    func saveLayout(_ grid: [[UInt64]], for display: String) {
+        displayLayoutColumns[display] = grid.first?.count ?? gridColumns
+        displayLayouts[display] = grid.flatMap { $0 }
+    }
+
+    /// Re-cuts a row-major layout for a new column count, keeping each Space at
+    /// the same row and column. Spaces in columns that no longer exist are
+    /// dropped here; `reconcile` puts them back in the first empty cell.
+    static func reflow(_ layout: [UInt64], from oldColumns: Int, to newColumns: Int) -> [UInt64] {
+        guard oldColumns > 0, newColumns > 0, oldColumns != newColumns else { return layout }
+        return stride(from: 0, to: layout.count, by: oldColumns).flatMap { start -> [UInt64] in
+            let row = layout[start..<min(start + oldColumns, layout.count)].prefix(newColumns)
+            return Array(row) + Array(repeating: 0, count: newColumns - row.count)
+        }
     }
 
     static func reconcile(saved: [UInt64], liveIDs: [UInt64]) -> [UInt64] {
@@ -135,11 +160,14 @@ class AppSettings: ObservableObject {
         transitionSpeed = TransitionSpeed(rawValue: defaults.string(forKey: "transitionSpeed") ?? "") ?? .instant
         if let data = defaults.data(forKey: "displayLayouts"),
            let layouts = try? JSONDecoder().decode([String: [UInt64]].self, from: data) { displayLayouts = layouts }
+        if let data = defaults.data(forKey: "displayLayoutColumns"),
+           let columns = try? JSONDecoder().decode([String: Int].self, from: data) { displayLayoutColumns = columns }
 
     }
 
     func resetToDefaults() {
         displayLayouts = [:]
+        displayLayoutColumns = [:]
         transitionSpeed = .instant
         edgeBehavior = .stop
         gridRows = 2

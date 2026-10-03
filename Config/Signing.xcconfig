@@ -1,0 +1,13 @@
+// Code signing for the Grindow target.
+//
+// The committed default signs ad hoc ("Sign to Run Locally"), so a fresh clone
+// or a CI runner builds without any certificate. Ad-hoc builds lose the
+// Accessibility grant on every rebuild, so on your own Mac run
+// `sh Scripts/setup-local-signing.sh` once: it writes the git-ignored
+// Signing.local.xcconfig below, which switches Xcode builds to the stable
+// "Grindow Local Development" identity. See Scripts/LOCAL-SIGNING.md.
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+#include? "Signing.local.xcconfig"
