@@ -94,22 +94,10 @@ class GestureInterceptor: ObservableObject {
     var onGestureBegan: (() -> Void)?
     var onSwipe: ((SwipeDirection) -> Void)?
 
-    // MARK: - Tunables
-
-    private let minFingerCount: Int = 3
-    /// Minimum |Δ| (in normalized [0,1] pad coords) before a swipe fires.
-    private let minAxialDelta: Float = 0.08
-    /// Dominant axis must exceed the other by this factor.
-    private let minAxialDominance: Float = 1.5
-
     // MARK: - State (main queue only)
 
     private var device: MTDeviceRef?
-    private var isTracking: Bool = false
-    private var swipeEmittedForCurrentGesture: Bool = false
-    private var startPositions: [Int32: (x: Float, y: Float)] = [:]
-    private var currentPositions: [Int32: (x: Float, y: Float)] = [:]
-    private var activeFingerIds: Set<Int32> = []
+    private var recognizer = ThreeFingerSwipeRecognizer()
 
     private init() {}
 
@@ -149,7 +137,7 @@ class GestureInterceptor: ObservableObject {
         MTUnregisterContactFrameCallback(dev, multitouchCallback)
         MTDeviceRelease(dev)
         device = nil
-        resetTracking()
+        recognizer.reset()
         isActive = false
         print("Grindow: Gesture interceptor stopped")
     }
@@ -158,92 +146,16 @@ class GestureInterceptor: ObservableObject {
 
     fileprivate func handleTouchFrame(touches: [MTTouch], timestamp: Double, frame: Int32) {
         guard device != nil else { return }
-        let inContact = touches.filter { $0.state == 4 }
-
-        guard inContact.count == minFingerCount else {
-            if isTracking { resetTracking() }
-            return
+        let contacts = touches.filter { $0.state == 4 }.map {
+            TouchPoint(id: $0.identifier, x: $0.normalized.posX, y: $0.normalized.posY)
         }
-
-        let ids = Set(inContact.map { $0.identifier })
-
-        if !isTracking {
-            beginTracking(touches: inContact, ids: ids)
-            return
+        switch recognizer.process(contacts) {
+        case .began?:
+            onGestureBegan?()
+        case .swipe(let direction)?:
+            onSwipe?(AppSettings.shared.invertSwipes ? direction.reversed : direction)
+        case nil:
+            break
         }
-
-        // Finger composition changed mid-gesture — reset to avoid stale deltas.
-        if ids != activeFingerIds {
-            resetTracking()
-            beginTracking(touches: inContact, ids: ids)
-            return
-        }
-
-        for t in inContact {
-            currentPositions[t.identifier] = (t.normalized.posX, t.normalized.posY)
-        }
-
-        if !swipeEmittedForCurrentGesture {
-            checkForSwipe()
-        }
-    }
-
-    private func beginTracking(touches: [MTTouch], ids: Set<Int32>) {
-        onGestureBegan?()
-        isTracking = true
-        swipeEmittedForCurrentGesture = false
-        activeFingerIds = ids
-        startPositions.removeAll(keepingCapacity: true)
-        currentPositions.removeAll(keepingCapacity: true)
-        for t in touches {
-            startPositions[t.identifier] = (t.normalized.posX, t.normalized.posY)
-            currentPositions[t.identifier] = (t.normalized.posX, t.normalized.posY)
-        }
-    }
-
-    private func resetTracking() {
-        isTracking = false
-        swipeEmittedForCurrentGesture = false
-        activeFingerIds.removeAll()
-        startPositions.removeAll(keepingCapacity: true)
-        currentPositions.removeAll(keepingCapacity: true)
-    }
-
-    private func checkForSwipe() {
-        guard !startPositions.isEmpty else { return }
-
-        var sumDX: Float = 0
-        var sumDY: Float = 0
-        var count: Float = 0
-        for (id, start) in startPositions {
-            guard let cur = currentPositions[id] else { continue }
-            sumDX += cur.x - start.x
-            sumDY += cur.y - start.y
-            count += 1
-        }
-        guard count > 0 else { return }
-
-        let avgDX = sumDX / count
-        let avgDY = sumDY / count
-        let absDX = abs(avgDX)
-        let absDY = abs(avgDY)
-
-        // Pick the dominant axis. If neither axis has enough travel, or neither
-        // dominates the other, don't emit.
-        let direction: SwipeDirection
-        if absDY >= minAxialDelta && absDY >= absDX * minAxialDominance {
-            // MT normalized coords: y=0 is near the user, y=1 is far.
-            // Fingers moving away from the user → avgDY > 0 → swipe up.
-            direction = avgDY > 0 ? .up : .down
-        } else if absDX >= minAxialDelta && absDX >= absDY * minAxialDominance {
-            // MT normalized coords: x=0 is left, x=1 is right.
-            // Fingers moving right → avgDX > 0 → swipe right.
-            direction = avgDX > 0 ? .right : .left
-        } else {
-            return
-        }
-
-        swipeEmittedForCurrentGesture = true
-        onSwipe?(AppSettings.shared.invertSwipes ? direction.reversed : direction)
     }
 }
