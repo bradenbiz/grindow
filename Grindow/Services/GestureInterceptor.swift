@@ -1,5 +1,6 @@
 import Cocoa
 import CoreGraphics
+import IOKit
 
 // MARK: - Private MultitouchSupport.framework bindings
 
@@ -42,8 +43,8 @@ private typealias MTContactFrameCallback = @convention(c) (
     Int32
 ) -> Int32
 
-@_silgen_name("MTDeviceCreateDefault")
-private func MTDeviceCreateDefault() -> MTDeviceRef?
+@_silgen_name("MTDeviceCreateList")
+private func MTDeviceCreateList() -> UnsafeMutableRawPointer?   // +1 CFArray of MTDeviceRef
 
 @_silgen_name("MTRegisterContactFrameCallback")
 private func MTRegisterContactFrameCallback(_ device: MTDeviceRef, _ callback: MTContactFrameCallback)
@@ -57,23 +58,44 @@ private func MTDeviceStart(_ device: MTDeviceRef, _ flags: Int32) -> Int32
 @_silgen_name("MTDeviceStop")
 private func MTDeviceStop(_ device: MTDeviceRef) -> Int32
 
-@_silgen_name("MTDeviceRelease")
-private func MTDeviceRelease(_ device: MTDeviceRef)
+// MARK: - C callbacks (cannot capture)
 
-// MARK: - C callback (cannot capture)
+/// In-contact count of the last frame forwarded to the main queue. The
+/// callback runs on MultitouchSupport's thread at ~90-120 Hz, so frames that
+/// neither have the tracked finger count nor change the count (ordinary
+/// pointing and scrolling) are dropped here instead of being copied and
+/// dispatched.
+private let forwardedCountLock = NSLock()
+private var lastForwardedCount = -1
 
-private let multitouchCallback: MTContactFrameCallback = { _, rawPtr, nTouches, timestamp, frame in
-    guard nTouches > 0, let rawPtr else {
-        DispatchQueue.main.async { GestureInterceptor.shared.handleTouchFrame(touches: [], timestamp: timestamp, frame: frame) }
-        return 0
-    }
-    let typedPtr = rawPtr.assumingMemoryBound(to: MTTouch.self)
-    let buffer = UnsafeBufferPointer(start: typedPtr, count: Int(nTouches))
-    let touches = Array(buffer)
-    DispatchQueue.main.async {
-        GestureInterceptor.shared.handleTouchFrame(touches: touches, timestamp: timestamp, frame: frame)
-    }
+private let multitouchCallback: MTContactFrameCallback = { _, rawPtr, nTouches, _, _ in
+    let count = rawPtr == nil ? 0 : Int(max(0, nTouches))
+    let touches = UnsafeBufferPointer<MTTouch>(
+        start: rawPtr.map { UnsafePointer($0.assumingMemoryBound(to: MTTouch.self)) }, count: count)
+    let inContact = touches.reduce(0) { $0 + ($1.state == 4 ? 1 : 0) }
+
+    forwardedCountLock.lock()
+    let changed = inContact != lastForwardedCount
+    lastForwardedCount = inContact
+    forwardedCountLock.unlock()
+    guard changed || inContact == GestureInterceptor.trackedFingerCount else { return 0 }
+
+    let contacts = touches.filter { $0.state == 4 }
+    DispatchQueue.main.async { GestureInterceptor.shared.handleTouchFrame(contacts: contacts) }
     return 0
+}
+
+/// Fires on the main run loop when a multitouch device appears or disappears.
+private let deviceHotplugCallback: IOServiceMatchingCallback = { _, iterator in
+    drainIterator(iterator)
+    GestureInterceptor.shared.scheduleReattach()
+}
+
+/// Releases every matched service; this also re-arms the notification.
+private func drainIterator(_ iterator: io_iterator_t) {
+    while case let service = IOIteratorNext(iterator), service != 0 {
+        IOObjectRelease(service)
+    }
 }
 
 // MARK: - GestureInterceptor
@@ -84,7 +106,8 @@ private let multitouchCallback: MTContactFrameCallback = { _, rawPtr, nTouches, 
 ///
 /// Note: this only *detects* swipes — macOS still acts on its built-in
 /// three-finger gestures unless the user disables them in
-/// System Settings → Trackpad → More Gestures.
+/// System Settings → Trackpad → More Gestures. `NativeTrackpadGestures`
+/// reports when that is the case so callers can avoid a double switch.
 class GestureInterceptor: ObservableObject {
     static let shared = GestureInterceptor()
 
@@ -96,7 +119,7 @@ class GestureInterceptor: ObservableObject {
 
     // MARK: - Tunables
 
-    private let minFingerCount: Int = 3
+    fileprivate static let trackedFingerCount: Int = 3
     /// Minimum |Δ| (in normalized [0,1] pad coords) before a swipe fires.
     private let minAxialDelta: Float = 0.08
     /// Dominant axis must exceed the other by this factor.
@@ -104,9 +127,22 @@ class GestureInterceptor: ObservableObject {
 
     // MARK: - State (main queue only)
 
-    private var device: MTDeviceRef?
+    /// Keeps the devices returned by `MTDeviceCreateList` alive while started.
+    private var deviceList: CFArray?
+    private var devices: [MTDeviceRef] = []
+    /// Whether the app wants gestures on; device changes re-attach only then.
+    private var wanted = false
+    private var wakeObserver: NSObjectProtocol?
+    private var notificationPort: IONotificationPortRef?
+    private var hotplugIterators: [io_iterator_t] = []
+    private var reattachWork: DispatchWorkItem?
+
     private var isTracking: Bool = false
     private var swipeEmittedForCurrentGesture: Bool = false
+    /// Set once more fingers than tracked touch down; cleared only when every
+    /// finger lifts, so a four-finger gesture never becomes a three-finger one
+    /// while fingers land or lift at slightly different times.
+    private var gestureHadExtraFingers: Bool = false
     private var startPositions: [Int32: (x: Float, y: Float)] = [:]
     private var currentPositions: [Int32: (x: Float, y: Float)] = [:]
     private var activeFingerIds: Set<Int32> = []
@@ -116,51 +152,112 @@ class GestureInterceptor: ObservableObject {
     // MARK: - Start / Stop
 
     func start() {
-        guard device == nil else { return }
+        wanted = true
+        installDeviceWatchers()
+        if devices.isEmpty { attachDevices() }
+    }
 
+    func stop() {
+        wanted = false
+        reattachWork?.cancel()
+        reattachWork = nil
+        detachDevices()
+        print("Grindow: Gesture interceptor stopped")
+    }
+
+    /// Re-creates the device list after wake or a trackpad being connected or
+    /// disconnected. Debounced: devices can take a moment to come back.
+    fileprivate func scheduleReattach() {
+        reattachWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.wanted else { return }
+            self.detachDevices()
+            self.attachDevices()
+        }
+        reattachWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    private func attachDevices() {
         let size = MemoryLayout<MTTouch>.size
         guard size == 96 else {
             print("Grindow: MTTouch struct size = \(size), expected 96. Aborting — layout mismatch would corrupt finger reads.")
             return
         }
 
-        guard let dev = MTDeviceCreateDefault() else {
-            print("Grindow: MTDeviceCreateDefault returned nil — no multitouch device available.")
+        guard let raw = MTDeviceCreateList() else {
+            print("Grindow: MTDeviceCreateList returned nil — no multitouch device available.")
             return
         }
+        let list = Unmanaged<CFArray>.fromOpaque(raw).takeRetainedValue()
 
-        MTRegisterContactFrameCallback(dev, multitouchCallback)
-        let result = MTDeviceStart(dev, 0)
-        guard result == 0 else {
-            print("Grindow: MTDeviceStart failed (\(result))")
-            MTUnregisterContactFrameCallback(dev, multitouchCallback)
-            MTDeviceRelease(dev)
-            return
+        forwardedCountLock.lock()
+        lastForwardedCount = -1
+        forwardedCountLock.unlock()
+
+        var started: [MTDeviceRef] = []
+        for index in 0..<CFArrayGetCount(list) {
+            guard let value = CFArrayGetValueAtIndex(list, index) else { continue }
+            let dev = UnsafeMutableRawPointer(mutating: value)
+            MTRegisterContactFrameCallback(dev, multitouchCallback)
+            let result = MTDeviceStart(dev, 0)
+            if result == 0 {
+                started.append(dev)
+            } else {
+                print("Grindow: MTDeviceStart failed (\(result))")
+                MTUnregisterContactFrameCallback(dev, multitouchCallback)
+            }
         }
 
-        device = dev
-        isActive = true
-        print("Grindow: Gesture interceptor started (MultitouchSupport)")
+        deviceList = list
+        devices = started
+        isActive = !started.isEmpty
+        print("Grindow: Gesture interceptor started on \(started.count) multitouch device(s)")
     }
 
-    func stop() {
-        guard let dev = device else { return }
-        _ = MTDeviceStop(dev)
-        MTUnregisterContactFrameCallback(dev, multitouchCallback)
-        MTDeviceRelease(dev)
-        device = nil
+    private func detachDevices() {
+        for dev in devices {
+            MTUnregisterContactFrameCallback(dev, multitouchCallback)
+            _ = MTDeviceStop(dev)
+        }
+        devices = []
+        deviceList = nil   // releases the devices
         resetTracking()
+        gestureHadExtraFingers = false
         isActive = false
-        print("Grindow: Gesture interceptor stopped")
+    }
+
+    private func installDeviceWatchers() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.scheduleReattach() }
+
+        guard let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        notificationPort = port
+        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .defaultMode)
+        for type in [kIOFirstMatchNotification, kIOTerminatedNotification] {
+            var iterator: io_iterator_t = 0
+            guard IOServiceAddMatchingNotification(port, type, IOServiceMatching("AppleMultitouchDevice"),
+                                                   deviceHotplugCallback, nil, &iterator) == KERN_SUCCESS else { continue }
+            // Devices already present are attached by start(); draining arms the notification.
+            drainIterator(iterator)
+            hotplugIterators.append(iterator)
+        }
     }
 
     // MARK: - Frame handling
 
-    fileprivate func handleTouchFrame(touches: [MTTouch], timestamp: Double, frame: Int32) {
-        guard device != nil else { return }
-        let inContact = touches.filter { $0.state == 4 }
+    fileprivate func handleTouchFrame(contacts inContact: [MTTouch]) {
+        guard !devices.isEmpty else { return }
 
-        guard inContact.count == minFingerCount else {
+        if inContact.isEmpty {
+            gestureHadExtraFingers = false
+        } else if inContact.count > Self.trackedFingerCount {
+            gestureHadExtraFingers = true
+        }
+
+        guard inContact.count == Self.trackedFingerCount, !gestureHadExtraFingers else {
             if isTracking { resetTracking() }
             return
         }
@@ -245,5 +342,42 @@ class GestureInterceptor: ObservableObject {
 
         swipeEmittedForCurrentGesture = true
         onSwipe?(AppSettings.shared.invertSwipes ? direction.reversed : direction)
+    }
+}
+
+// MARK: - Native trackpad gestures
+
+/// Reads macOS's trackpad preferences to see whether the system also acts on
+/// three-finger swipes along an axis. When it does, macOS and Grindow would
+/// both switch Spaces on the same swipe.
+enum NativeTrackpadGestures {
+    /// Built-in trackpad first, then Magic Trackpad; System Settings writes both.
+    private static let domains = [
+        "com.apple.AppleMultitouchTrackpad",
+        "com.apple.driver.AppleBluetoothMultitouch.trackpad"
+    ]
+
+    /// "Swipe between full-screen apps" is set to three fingers.
+    static var claimsHorizontalSwipes: Bool { value(for: "TrackpadThreeFingerHorizSwipeGesture") != 0 }
+
+    /// Mission Control / App Exposé are set to three fingers.
+    static var claimsVerticalSwipes: Bool { value(for: "TrackpadThreeFingerVertSwipeGesture") != 0 }
+
+    static func claims(_ direction: SwipeDirection) -> Bool {
+        switch direction {
+        case .left, .right: return claimsHorizontalSwipes
+        case .up, .down: return claimsVerticalSwipes
+        }
+    }
+
+    private static func value(for key: String) -> Int {
+        for domain in domains {
+            // Pick up changes System Settings made after launch.
+            CFPreferencesAppSynchronize(domain as CFString)
+            if let number = CFPreferencesCopyAppValue(key as CFString, domain as CFString) as? NSNumber {
+                return number.intValue
+            }
+        }
+        return 2 // Unset means the macOS default: three fingers.
     }
 }
