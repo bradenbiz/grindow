@@ -1,258 +1,178 @@
 import Cocoa
 import CoreGraphics
 
-// MARK: - Private CoreGraphics SPI declarations for Space management
-
-/// These are private/undocumented CoreGraphics APIs used by macOS internally
-/// for managing Spaces (virtual desktops). They are stable across macOS versions
-/// but are not part of the public SDK.
-
-private typealias CGSConnectionID = UInt32
-
 @_silgen_name("CGSMainConnectionID")
-private func CGSMainConnectionID() -> CGSConnectionID
-
+private func CGSMainConnectionID() -> UInt32
 @_silgen_name("CGSCopyManagedDisplaySpaces")
-private func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> CFArray?
+private func CGSCopyManagedDisplaySpaces(_ connection: UInt32, _ display: CFString?) -> CFArray?
 
-@_silgen_name("CGSGetActiveSpace")
-private func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
-
-@_silgen_name("CGSMoveWorkspaceToSpace")
-private func CGSMoveWorkspaceToSpace(_ connection: CGSConnectionID, _ workspaceID: Int, _ spaceID: UInt64)
-
-@_silgen_name("CGSAddWindowsToSpaces")
-private func CGSAddWindowsToSpaces(_ connection: CGSConnectionID, _ windowIDs: CFArray, _ spaceIDs: CFArray)
-
-@_silgen_name("CGSRemoveWindowsFromSpaces")
-private func CGSRemoveWindowsFromSpaces(_ connection: CGSConnectionID, _ windowIDs: CFArray, _ spaceIDs: CFArray)
-
-// MARK: - Space information
-
-struct SpaceInfo: Identifiable, Equatable {
-    let id: UInt64
-    let index: Int          // 0-based index in the spaces list
-    let type: SpaceType
-    let displayUUID: String
-    var label: String       // User-visible label (e.g., "Desktop 1", app name for fullscreen)
-
-    enum SpaceType: Int {
-        case desktop = 0    // Regular desktop space
-        case fullscreen = 4 // Full-screen application space
-        case unknown = -1
-    }
-}
-
-// MARK: - SpaceManager
-
-/// Manages detection and switching of macOS Spaces using private CoreGraphics APIs.
+@MainActor
 class SpaceManager: ObservableObject {
     static let shared = SpaceManager()
+    @Published private(set) var displays: [DisplaySpaces] = []
+    @Published private(set) var spaces: [SpaceInfo] = []
+    @Published private(set) var activeSpaceID: UInt64 = 0
+    @Published private(set) var selectedDisplayID = ""
+    @Published private(set) var isSwitching = false
+    @Published var lastError: String?
+    var onChange: (() -> Void)?
+    private var observers: [NSObjectProtocol] = []
 
-    @Published var spaces: [SpaceInfo] = []
-    @Published var activeSpaceID: UInt64 = 0
-
-    private var connection: CGSConnectionID = 0
-    private var spaceChangeObserver: NSObjectProtocol?
+    private lazy var coordinator: SpaceSwitchCoordinator = {
+        let worker = SpaceSwitchCoordinator(snapshot: { [weak self] id in
+            self?.readDisplays().first { $0.id == id }
+        }, post: { [weak self] right, display, steps in
+            guard let self else { throw SpaceSwitchCoordinator.Failure.unavailable }
+            try await self.postSwipe(right: right, display: display, steps: steps)
+        })
+        worker.onProgress = { [weak self] in self?.refreshSpaces(); self?.onChange?() }
+        worker.onFinish = { [weak self] error in
+            guard let self else { return }
+            self.isSwitching = false
+            self.lastError = error?.localizedDescription
+            self.refreshSpaces()
+            self.onChange?()
+        }
+        return worker
+    }()
 
     private init() {
-        connection = CGSMainConnectionID()
         refreshSpaces()
-        startObservingSpaceChanges()
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshSpaces(); self?.onChange?() }
+        })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelSwitching(); self?.refreshSpaces(); self?.onChange?() }
+        })
     }
 
-    deinit {
-        if let observer = spaceChangeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(observer)
-        }
+    private func uuid(for id: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String
     }
 
-    // MARK: - Space Detection
+    private func screenID(_ screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
 
-    /// Refreshes the list of all spaces from the system.
-    func refreshSpaces() {
-        guard let displaySpaces = CGSCopyManagedDisplaySpaces(connection) as? [[String: Any]] else {
-            return
-        }
-
-        var detectedSpaces: [SpaceInfo] = []
-        var globalIndex = 0
-
-        for displayInfo in displaySpaces {
-            let displayUUID = displayInfo["Display Identifier"] as? String ?? "Unknown"
-            guard let spacesArray = displayInfo["Spaces"] as? [[String: Any]] else { continue }
-
-            for spaceDict in spacesArray {
-                guard let spaceID = spaceDict["ManagedSpaceID"] as? UInt64 ?? spaceDict["id64"] as? UInt64 else {
-                    continue
-                }
-
-                let typeRaw = spaceDict["type"] as? Int ?? -1
-                let type = SpaceInfo.SpaceType(rawValue: typeRaw) ?? .unknown
-
-                let label: String
-                if type == .fullscreen {
-                    label = fullscreenAppName(forSpaceID: spaceID) ?? "Full Screen \(globalIndex + 1)"
-                } else {
-                    label = "Desktop \(globalIndex + 1)"
-                }
-
-                let info = SpaceInfo(
-                    id: spaceID,
-                    index: globalIndex,
-                    type: type,
-                    displayUUID: displayUUID,
-                    label: label
-                )
-                detectedSpaces.append(info)
-                globalIndex += 1
+    private func readDisplays() -> [DisplaySpaces] {
+        guard strafe_cgs_available(),
+              let roster = CGSCopyManagedDisplaySpaces(CGSMainConnectionID(), nil) as? [[String: Any]] else { return [] }
+        var connected: [String: String] = [:]
+        for (index, screen) in NSScreen.screens.enumerated() {
+            if let number = screenID(screen), let id = uuid(for: number) {
+                connected[id] = "\(index + 1): \(screen.localizedName)"
             }
         }
-
-        DispatchQueue.main.async {
-            self.spaces = detectedSpaces
-            self.activeSpaceID = CGSGetActiveSpace(self.connection)
-        }
+        return DisplaySpaces.parse(roster, connected: connected, mainDisplayID: uuid(for: CGMainDisplayID()) ?? "")
     }
 
-    /// Returns the active space ID.
-    func getActiveSpaceID() -> UInt64 {
-        activeSpaceID = CGSGetActiveSpace(connection)
-        return activeSpaceID
+    func refreshSpaces() {
+        displays = readDisplays()
+        if !displays.contains(where: { $0.id == selectedDisplayID }) {
+            selectedDisplayID = displays.first?.id ?? ""
+        }
+        let selected = displays.first { $0.id == selectedDisplayID }
+        spaces = (selected?.spaces ?? []).map { info in
+            var copy = info
+            copy.label = AppSettings.shared.customName(forSpaceID: info.id) ?? info.label
+            return copy
+        }
+        activeSpaceID = selected?.currentSpaceID ?? 0
     }
 
-    // MARK: - Space Switching
+    func selectDisplay(_ id: String) {
+        guard displays.contains(where: { $0.id == id }), id != selectedDisplayID else { return }
+        selectedDisplayID = id
+        refreshSpaces()
+        onChange?()
+    }
 
-    /// Switches to a space by its ID using keyboard shortcut simulation.
-    /// This is more reliable than direct CGS API calls for space switching.
-    func switchToSpace(id targetSpaceID: UInt64) {
-        guard targetSpaceID != activeSpaceID else { return }
-
-        // Find the index of the target space
-        guard let targetIndex = spaces.firstIndex(where: { $0.id == targetSpaceID }),
-              let currentIndex = spaces.firstIndex(where: { $0.id == activeSpaceID }) else {
-            return
-        }
-
-        let target = spaces[targetIndex].index
-        let current = spaces[currentIndex].index
-
-        // Try direct keyboard shortcut first (Ctrl+Number for spaces 1-9)
-        if target < 9 {
-            if simulateSpaceSwitchKeyboard(spaceNumber: target + 1) {
+    /// Called once when raw touch tracking begins, so the gesture keeps its display.
+    func selectCursorDisplay() {
+        guard let point = CGEvent(source: nil)?.location else { return }
+        for screen in NSScreen.screens {
+            if let number = screenID(screen), CGDisplayBounds(number).contains(point), let id = uuid(for: number) {
+                selectDisplay(id)
                 return
             }
         }
-
-        // Fallback: simulate sequential Ctrl+Arrow key presses
-        let diff = target - current
-        if diff != 0 {
-            simulateSequentialArrowSwitch(steps: diff)
-        }
     }
 
-    /// Switches to the space at the given grid position using the SpaceGrid.
-    func switchToSpace(at position: GridPosition, in grid: SpaceGrid) {
-        guard let targetID = grid.spaceID(at: position) else { return }
-        switchToSpace(id: targetID)
-        grid.currentPosition = position
+    func getActiveSpaceID() -> UInt64 {
+        refreshSpaces()
+        return activeSpaceID
     }
 
-    // MARK: - Keyboard Simulation
+    var navigationSpaceID: UInt64 {
+        coordinator.displayID == selectedDisplayID ? (coordinator.targetID ?? activeSpaceID) : activeSpaceID
+    }
 
-    /// Simulates Ctrl+Number shortcut to jump directly to a space.
-    /// Returns true if the shortcut was sent successfully.
-    /// Note: User must have "Switch to Desktop N" shortcuts enabled in
-    /// System Preferences > Keyboard > Shortcuts > Mission Control.
-    private func simulateSpaceSwitchKeyboard(spaceNumber: Int) -> Bool {
-        guard spaceNumber >= 1 && spaceNumber <= 9 else { return false }
-
-        // Key codes for 1-9
-        let keyCodes: [Int: CGKeyCode] = [
-            1: 18, 2: 19, 3: 20, 4: 21, 5: 23,
-            6: 22, 7: 26, 8: 28, 9: 25
-        ]
-
-        guard let keyCode = keyCodes[spaceNumber] else { return false }
-
-        let source = CGEventSource(stateID: .hidSystemState)
-
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+    @discardableResult
+    func switchToSpace(id target: UInt64) -> Bool {
+        guard AccessibilityHelper.shared.isAccessibilityGranted else {
+            lastError = "Grant Accessibility access in Settings to switch Spaces."
             return false
         }
-
-        // Add Control modifier
-        keyDown.flags = .maskControl
-        keyUp.flags = .maskControl
-
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
-
+        guard !strafe_is_expose_active() else {
+            lastError = "Close Mission Control or App Exposé before navigating the grid."
+            return false
+        }
+        guard coordinator.request(target: target, display: selectedDisplayID) else {
+            lastError = "Finish switching on the other display, or refresh the selected Space."
+            return false
+        }
+        lastError = nil
+        isSwitching = true
         return true
     }
 
-    /// Simulates sequential Ctrl+Arrow presses to move between spaces.
-    private func simulateSequentialArrowSwitch(steps: Int) {
-        let direction: CGKeyCode = steps > 0 ? 124 : 123  // Right : Left arrow
-        let count = abs(steps)
+    func switchToSpace(at position: GridPosition, in grid: SpaceGrid) {
+        guard let id = grid.spaceID(at: position) else { return }
+        switchToSpace(id: id)
+    }
 
-        let source = CGEventSource(stateID: .hidSystemState)
+    func cancelSwitching() { coordinator.cancel() }
 
-        for i in 0..<count {
-            let delay = DispatchTimeInterval.milliseconds(i * 300)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: direction, keyDown: true),
-                      let keyUp = CGEvent(keyboardEventSource: source, virtualKey: direction, keyDown: false) else {
-                    return
+    private func postSwipe(right: Bool, display: String, steps: Int) async throws {
+        guard AccessibilityHelper.shared.isAccessibilityGranted, !strafe_is_expose_active(),
+              let screen = NSScreen.screens.first(where: { screen in
+                  screenID(screen).flatMap { uuid(for: $0) } == display
+              }), let number = screenID(screen) else { throw SpaceSwitchCoordinator.Failure.unavailable }
+        let bounds = CGDisplayBounds(number)
+        let point = CGPoint(x: bounds.midX, y: bounds.midY)
+        let speed = AppSettings.shared.transitionSpeed
+        if steps > 1 || speed == .instant {
+            // A synchronous C loop posts the whole route before yielding. Verify
+            // only after posting; do not deliberately present each intermediate Space.
+            guard steps > 0, steps <= 128,
+                  strafe_post_switch_gestures(right ? StrafeDirectionRight : StrafeDirectionLeft, UInt32(steps), point) else {
+                throw SpaceSwitchCoordinator.Failure.postFailed
+            }
+            return
+        }
+        let sign: Double = right ? 1 : -1
+        guard strafe_post_dock_swipe_phase(1, 0, 0, point) else { throw SpaceSwitchCoordinator.Failure.postFailed }
+        do {
+            for step in 1...6 {
+                try Task.checkCancellation()
+                let fraction = Double(step) / 6
+                guard strafe_post_dock_swipe_phase(2, sign * 0.35 * fraction, sign * 130 * fraction, point) else {
+                    throw SpaceSwitchCoordinator.Failure.postFailed
                 }
-
-                keyDown.flags = .maskControl
-                keyUp.flags = .maskControl
-
-                keyDown.post(tap: .cghidEventTap)
-                keyUp.post(tap: .cghidEventTap)
+                try await Task.sleep(nanoseconds: speed.rampNanoseconds / 6)
             }
-        }
-    }
-
-    // MARK: - Helpers
-
-    /// Attempts to find the app name for a full-screen space.
-    private func fullscreenAppName(forSpaceID spaceID: UInt64) -> String? {
-        // Get all windows and find the one on this space
-        let options: CGWindowListOption = [.optionAll]
-        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-
-        for window in windowList {
-            if let ownerName = window[kCGWindowOwnerName as String] as? String,
-               let layer = window[kCGWindowLayer as String] as? Int,
-               layer == 0 {
-                // Heuristic: check if this window's app might be in the fullscreen space
-                // This is imperfect without more private APIs
-                return ownerName
+            guard strafe_post_dock_swipe_phase(4, sign * 0.35, sign * 130, point) else {
+                throw SpaceSwitchCoordinator.Failure.postFailed
             }
+        } catch {
+            // Always close a started gesture, including cancellation on disable/unplug.
+            _ = strafe_post_dock_swipe_phase(8, 0, 0, point)
+            throw error
         }
-        return nil
-    }
-
-    // MARK: - Space Change Observation
-
-    private func startObservingSpaceChanges() {
-        spaceChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleSpaceChange()
-        }
-    }
-
-    private func handleSpaceChange() {
-        activeSpaceID = CGSGetActiveSpace(connection)
-        // Also refresh spaces in case spaces were added/removed
-        refreshSpaces()
     }
 }

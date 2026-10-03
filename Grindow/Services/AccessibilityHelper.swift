@@ -1,64 +1,30 @@
 import Cocoa
 import ApplicationServices
+import Combine
 
-/// Handles checking and requesting macOS Accessibility permissions,
-/// which are required for CGEventTap to intercept system gestures.
-class AccessibilityHelper {
+final class AccessibilityHelper: ObservableObject {
     static let shared = AccessibilityHelper()
-
+    @Published private(set) var isGranted = AXIsProcessTrusted()
+    private var timer: Timer?
+    var isAccessibilityGranted: Bool { AXIsProcessTrusted() }
     private init() {}
 
-    /// Returns true if the app has Accessibility permissions.
-    var isAccessibilityGranted: Bool {
-        AXIsProcessTrusted()
+    func startMonitoring() {
+        guard timer == nil else { return }
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
-    /// Prompts the user to grant Accessibility permissions.
-    /// Opens System Preferences if permissions are not granted.
+    func refresh() {
+        let granted = AXIsProcessTrusted()
+        if granted != isGranted { isGranted = granted }
+    }
+
     func requestAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
-    }
-
-    /// Checks permissions and shows an alert if not granted.
-    /// Returns true if permissions are already granted.
-    @discardableResult
-    func checkAndPrompt() -> Bool {
-        if isAccessibilityGranted {
-            return true
-        }
-
-        // Show an informative alert
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permission Required"
-        alert.informativeText = """
-            Grindow needs Accessibility access to intercept trackpad gestures \
-            and enable vertical Space switching.
-
-            Click "Open System Settings" to grant access, then restart Grindow.
-            """
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Later")
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            requestAccessibility()
-        }
-
-        return false
-    }
-
-    /// Polls for accessibility permission changes.
-    /// Calls the completion handler on the main thread when permission is granted.
-    func waitForPermission(pollInterval: TimeInterval = 1.0, completion: @escaping () -> Void) {
-        Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { timer in
-            if AXIsProcessTrusted() {
-                timer.invalidate()
-                DispatchQueue.main.async {
-                    completion()
-                }
-            }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 }

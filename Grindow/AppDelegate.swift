@@ -8,6 +8,7 @@ import SwiftUI
 /// - Initializes and connects the gesture interceptor, space manager, and grid
 /// - Handles swipe events and translates them into space switches
 /// - Manages the settings and grid configuration windows
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Components
@@ -16,6 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let gestureInterceptor = GestureInterceptor.shared
     private let settings = AppSettings.shared
     private let spaceGrid = SpaceGrid()
+    private let swipeOverlay = SwipeGridOverlayController()
 
     // MARK: - UI
 
@@ -32,11 +34,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopover()
         setupSpaceGrid()
         setupGestureInterceptor()
-        checkAccessibility()
         setupEventMonitor()
+        showFirstRunGuideIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        swipeOverlay.hide()
+        spaceManager.cancelSwitching()
         gestureInterceptor.stop()
     }
 
@@ -90,11 +94,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.close()
         } else {
-            // Refresh data before showing
-            spaceManager.refreshSpaces()
-            let activeID = spaceManager.getActiveSpaceID()
-            spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
+            // Always show the latest state when opening.
+            syncGridToSystem()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
@@ -112,59 +113,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Space Grid
 
     private func setupSpaceGrid() {
-        let spaceIDs = spaceManager.spaces.map { $0.id }
+        spaceManager.onChange = { [weak self] in self?.rebuildGrid() }
+        rebuildGrid()
+        settings.$gridRows.combineLatest(settings.$gridColumns)
+            .debounce(for: .milliseconds(30), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.rebuildGrid() }.store(in: &cancellables)
+    }
 
-        // Restore saved layout or auto-arrange
-        if !settings.gridLayout.isEmpty {
-            spaceGrid.arrange(
-                spaceIDs: settings.gridLayout,
-                rows: settings.gridRows,
-                columns: settings.gridColumns
-            )
-        } else {
-            spaceGrid.arrange(
-                spaceIDs: spaceIDs,
-                rows: settings.gridRows,
-                columns: settings.gridColumns
-            )
-        }
+    private func syncGridToSystem() {
+        spaceManager.refreshSpaces()
+        rebuildGrid()
+    }
 
-        // Set initial position
-        let activeID = spaceManager.getActiveSpaceID()
-        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
-
-        // Observe space changes to update current position
-        NotificationCenter.default.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self = self else { return }
-            let newActiveID = self.spaceManager.getActiveSpaceID()
-            self.spaceGrid.updateCurrentPosition(forSpaceID: newActiveID)
-        }
+    private func rebuildGrid() {
+        let ids = spaceManager.spaces.map(\.id)
+        let layout = settings.layout(for: spaceManager.selectedDisplayID, liveIDs: ids)
+        spaceGrid.arrange(spaceIDs: layout, rows: settings.gridRows, columns: settings.gridColumns)
+        spaceGrid.updateCurrentPosition(forSpaceID: spaceManager.activeSpaceID)
+        swipeOverlay.update(grid: spaceGrid, manager: spaceManager)
     }
 
     // MARK: - Gesture Interceptor
 
     private func setupGestureInterceptor() {
         gestureInterceptor.onSwipe = { [weak self] direction in
-            print("GRINDOW: onSwipe direction=\(direction)")
             self?.handleSwipe(direction: direction)
         }
 
-        if settings.isEnabled && AccessibilityHelper.shared.isAccessibilityGranted {
-            gestureInterceptor.start()
-        }
-
-        // Observe settings changes
-        settings.$isEnabled.receive(on: DispatchQueue.main).sink { [weak self] enabled in
-            guard let self = self else { return }
-            if enabled && AccessibilityHelper.shared.isAccessibilityGranted {
-                self.gestureInterceptor.start()
-            } else {
-                self.gestureInterceptor.stop()
-            }
+        gestureInterceptor.onGestureBegan = { [weak self] in self?.spaceManager.selectCursorDisplay() }
+        let permissions = AccessibilityHelper.shared
+        permissions.startMonitoring()
+        settings.$isEnabled.combineLatest(permissions.$isGranted)
+            .receive(on: DispatchQueue.main).sink { [weak self] enabled, granted in
+                guard let self else { return }
+                if enabled && granted {
+                    self.gestureInterceptor.start()
+                } else {
+                    self.gestureInterceptor.stop()
+                    self.spaceManager.cancelSwitching()
+                    self.swipeOverlay.hide()
+                }
+            }.store(in: &cancellables)
+        settings.$showSwipeGrid.sink { [weak self] show in
+            if !show { self?.swipeOverlay.hide() }
         }.store(in: &cancellables)
     }
 
@@ -176,39 +167,78 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard settings.isEnabled else { return }
 
         // Refresh current position from active space
-        let activeID = spaceManager.getActiveSpaceID()
-        spaceGrid.updateCurrentPosition(forSpaceID: activeID)
+        syncGridToSystem()
+        // Repeated swipes route from the pending destination without falsely
+        // marking it active in the UI before macOS confirms it.
+        let navigationID = spaceManager.navigationSpaceID
+        guard let current = spaceGrid.position(forSpaceID: navigationID) else { return }
 
-        let current = spaceGrid.currentPosition
-
-        if let targetPosition = spaceGrid.targetPosition(
+        let target = spaceGrid.targetPosition(
             from: current,
             direction: direction,
             edgeBehavior: settings.edgeBehavior
-        ) {
+        )
+
+        if let targetPosition = target {
             // Valid target — switch to it
-            spaceManager.switchToSpace(at: targetPosition, in: spaceGrid)
+            guard let id = spaceGrid.spaceID(at: targetPosition),
+                  spaceManager.switchToSpace(id: id) else { return }
         } else {
             // At the edge
             if settings.edgeBehavior == .bounce && settings.showBounceAnimation {
                 BounceOverlayController.shared.showBounce(direction: direction)
             }
         }
+        if settings.showSwipeGrid {
+            swipeOverlay.show(grid: spaceGrid, manager: spaceManager)
+        }
     }
 
-    // MARK: - Accessibility
+    // MARK: - First-Run Guide
 
-    private func checkAccessibility() {
-        if !AccessibilityHelper.shared.isAccessibilityGranted {
-            AccessibilityHelper.shared.checkAndPrompt()
+    /// On first launch, prompt the user to disable macOS's built-in three-finger
+    /// gestures so Grindow's vertical-swipe handler isn't fighting Mission Control.
+    private func showFirstRunGuideIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: "hasShownNativeSwitchGuide") else { return }
 
-            // Poll for permission grant
-            AccessibilityHelper.shared.waitForPermission { [weak self] in
-                guard let self = self else { return }
-                if self.settings.isEnabled {
-                    self.gestureInterceptor.start()
+        // Defer so the menu bar item shows up first and the alert isn't presented
+        // before the rest of the UI is ready.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self = self else { return }
+
+            let alert = NSAlert()
+            alert.messageText = "One quick setup step"
+            alert.informativeText = """
+            Grindow uses three-finger swipes to navigate the grid on the display under your pointer. \
+            macOS uses the same gesture for Mission Control and App Exposé by default, \
+            so they will fight each other until you turn the built-in versions off.
+
+            In System Settings → Trackpad → More Gestures, set \
+            "Swipe between full-screen apps", "Mission Control", and "App Exposé" to "Off" \
+            (or switch them to four fingers).
+
+            Enable Accessibility for Grindow in its Settings to allow Space switching.
+            """
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Open Trackpad Settings")
+            alert.addButton(withTitle: "Later")
+
+            NSApp.activate(ignoringOtherApps: true)
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                let urls = [
+                    "x-apple.systempreferences:com.apple.Trackpad-Settings.extension",
+                    "x-apple.systempreferences:com.apple.preference.trackpad"
+                ]
+                for raw in urls {
+                    if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                        break
+                    }
                 }
             }
+
+            self.settings.hasShownFirstRunGuide = true
+            UserDefaults.standard.set(true, forKey: "hasShownNativeSwitchGuide")
         }
     }
 
@@ -227,7 +257,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Grindow Settings"
         window.styleMask = [.titled, .closable, .resizable]
-        window.setContentSize(NSSize(width: 460, height: 420))
+        window.setContentSize(NSSize(width: 480, height: 580))
         window.center()
         window.delegate = self
         window.makeKeyAndOrderFront(nil)
