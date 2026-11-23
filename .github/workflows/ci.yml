@@ -33,8 +33,20 @@ jobs:
       - name: Native C tests
         run: sh Scripts/test-native.sh
 
-      # No signing identity exists on the runner; this only proves the app compiles and links.
-      - name: Build app (unsigned)
+      # No signing identity exists on the runner. The build is universal so the
+      # Intel macOS VM on Lisbon (Scripts/vm, docs in TESTING-VM.md) can run it.
+      - name: Build app (unsigned, universal)
         run: |
           xcodebuild -project Grindow.xcodeproj -target Grindow -configuration Debug \
+            ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= build
+          lipo -info build/Debug/Grindow.app/Contents/MacOS/Grindow
+
+      - name: Package app
+        run: ditto -c -k --keepParent build/Debug/Grindow.app Grindow.app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Grindow-app
+          path: Grindow.app.zip
+          retention-days: 14
