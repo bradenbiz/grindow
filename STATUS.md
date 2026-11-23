@@ -87,7 +87,8 @@ sh Scripts/build-local.sh
 
 Grant Accessibility and turn off native three-finger Swipe between full-screen
 apps, Mission Control, and App Exposé (or assign them to four fingers). Grindow
-retains raw MultitouchSupport recognition; no native event interception is included.
+reads three-finger swipes from a listen-only gesture event tap (`NSTouch`s, public
+API only; adapted from Spaceman); it never blocks or alters native events.
 
 Retest 6 → 4 and longer row jumps for speed, destination accuracy, and intermediate
 flashing. Check all three monitors, including selected-display clicks when the
