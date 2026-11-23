@@ -85,7 +85,7 @@ private let multitouchCallback: MTContactFrameCallback = { _, rawPtr, nTouches, 
 /// Note: this only *detects* swipes — macOS still acts on its built-in
 /// three-finger gestures unless the user disables them in
 /// System Settings → Trackpad → More Gestures.
-class GestureInterceptor: ObservableObject {
+class GestureInterceptor: NSObject, ObservableObject {
     static let shared = GestureInterceptor()
 
     @Published var isActive: Bool = false
@@ -99,7 +99,7 @@ class GestureInterceptor: ObservableObject {
     private var device: MTDeviceRef?
     private var recognizer = ThreeFingerSwipeRecognizer()
 
-    private init() {}
+    private override init() {}
 
     // MARK: - Start / Stop
 
@@ -149,13 +149,66 @@ class GestureInterceptor: ObservableObject {
         let contacts = touches.filter { $0.state == 4 }.map {
             TouchPoint(id: $0.identifier, x: $0.normalized.posX, y: $0.normalized.posY)
         }
-        switch recognizer.process(contacts) {
-        case .began?:
+        if let event = recognizer.process(contacts) { deliver(event) }
+    }
+
+    /// Hands a recognizer event to the app. Live frames and the debug
+    /// injection below both come through here, so they share everything
+    /// after recognition, including inversion.
+    private func deliver(_ event: ThreeFingerSwipeRecognizer.Event) {
+        switch event {
+        case .began:
             onGestureBegan?()
-        case .swipe(let direction)?:
+        case .swipe(let direction):
             onSwipe?(AppSettings.shared.invertSwipes ? direction.reversed : direction)
-        case nil:
-            break
         }
     }
+
+    // MARK: - Debug swipe injection
+
+    #if DEBUG
+    /// Debug builds only: lets a script stand in for the trackpad, for testing
+    /// in a VM, which has none. Post the distributed notification
+    /// `com.grindow.debug.swipe` with `userInfo["direction"]` set to "up",
+    /// "down", "left" or "right" (Scripts/vm/swipe.swift does this). Each one
+    /// acts like a three-finger swipe the recognizer just saw: `.began`, then
+    /// `.swipe`, before inversion. Works whether or not a trackpad was found,
+    /// so it bypasses only MultitouchSupport and the recognizer.
+    static let debugSwipeNotification = Notification.Name("com.grindow.debug.swipe")
+
+    func startDebugSwipeInjection() {
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(debugSwipeReceived(_:)),
+            name: Self.debugSwipeNotification,
+            object: nil,
+            // Grindow is a menu bar app and is rarely frontmost; the default
+            // behavior would hold or coalesce notifications while inactive.
+            suspensionBehavior: .deliverImmediately
+        )
+        // NSLog, not print, so `grindow-vm log` shows these lines.
+        NSLog("Grindow: debug swipe injection listening for %@", Self.debugSwipeNotification.rawValue)
+    }
+
+    @objc private func debugSwipeReceived(_ note: Notification) {
+        let raw = note.userInfo?["direction"] as? String
+        let direction: SwipeDirection?
+        switch raw {
+        case "up": direction = .up
+        case "down": direction = .down
+        case "left": direction = .left
+        case "right": direction = .right
+        default: direction = nil
+        }
+        guard let direction else {
+            NSLog("Grindow: debug swipe ignored, bad direction %@", raw ?? "nil")
+            return
+        }
+        NSLog("Grindow: debug swipe %@", "\(direction)")
+        DispatchQueue.main.async {
+            self.deliver(.began)
+            self.deliver(.swipe(direction))
+        }
+    }
+    #endif
 }

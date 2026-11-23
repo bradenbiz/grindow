@@ -33,6 +33,11 @@ Grindow
   log [MINUTES]              Grindow's log lines from the last MINUTES (default 10)
   spaces                     Spaces per display and which one is active
   switch left|right [N]      press Ctrl-arrow N times (macOS's own Space switch), then print spaces
+  swipe DIR[,DIR...] [N] [--interval MS] [--settle S]
+                             fake N three-finger swipes per DIR (up, down, left, right),
+                             MS apart (default 300), into a Debug build; wait S seconds
+                             (default 2), then print spaces. `swipe right,left 3` sends
+                             right x3 then left x3 with no pause between, for reversals
 EOF
 }
 
@@ -81,6 +86,26 @@ open ~/$APP_DIR/Grindow.app
 sleep 2; pgrep -x Grindow >/dev/null && echo 'Grindow is running'"
 }
 
+cmd_swipe() {
+    local dirs=${1:?direction: up, down, left or right}; shift
+    local n=1 interval=300 settle=2
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --interval) interval=$2; shift 2 ;;
+            --settle) settle=$2; shift 2 ;;
+            *) n=$1; shift ;;
+        esac
+    done
+    # Compile once per change: `swift script.swift` takes seconds to start,
+    # which would space out a burst.
+    local here; here=$(cd "$(dirname "$0")" && pwd)
+    vm "mkdir -p ~/.grindow-vm && cat > ~/.grindow-vm/swipe.swift.new" < "$here/swipe.swift"
+    vm "cd ~/.grindow-vm && if ! cmp -s swipe.swift.new swipe.swift || [ ! -x swipe ]; then
+mv swipe.swift.new swipe.swift && swiftc -O swipe.swift -o swipe; else rm swipe.swift.new; fi
+./swipe $(q "$dirs" "$n" "$interval") && sleep $(q "$settle")"
+    cmd_spaces
+}
+
 cmd_spaces() {
     vm 'swift ~/.grindow-vm/spaces.swift'
 }
@@ -105,6 +130,7 @@ case "${1:-}" in
         dir=${2:?left or right}; n=${3:-1}
         for _ in $(seq "$n"); do mb key "ctrl-$dir" >/dev/null; sleep 0.8; done
         cmd_spaces ;;
+    swipe) shift; cmd_swipe "$@" ;;
     ''|-h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
 esac

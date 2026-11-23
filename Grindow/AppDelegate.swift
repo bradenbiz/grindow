@@ -141,6 +141,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         gestureInterceptor.onGestureBegan = { [weak self] in self?.spaceManager.selectCursorDisplay() }
+        #if DEBUG
+        gestureInterceptor.startDebugSwipeInjection()
+        #endif
         let permissions = AccessibilityHelper.shared
         permissions.startMonitoring()
         settings.$isEnabled.combineLatest(permissions.$isGranted)
