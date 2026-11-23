@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# grindow-vm: test Grindow in the macOS 26 VM on Lisbon without anyone's Mac.
+#
+# The VM is macbox (https://github.com/0xdaniell/macbox) in rootless Docker on
+# Lisbon. Run this from Malta, Lisbon, or any tailnet machine with `gh` and
+# `tailscale`. See TESTING-VM.md.
+set -euo pipefail
+
+HOST=${GRINDOW_VM_HOST:-lisbon}
+MACBOX=${GRINDOW_VM_MACBOX:-\$HOME/repos/macbox/macbox}
+REPO=${GRINDOW_VM_REPO:-bradenbiz/grindow}
+APP_DIR='Applications'   # in the VM user's home
+IDENTITY='Grindow Local Development'
+
+usage() {
+    cat <<'EOF'
+usage: grindow-vm <command> [args]
+
+VM
+  up | down | status         start, stop or show the VM (up takes about 1 minute)
+  sh [command...]            a command in the VM over SSH (no args: a shell)
+  shot [out.png]             screenshot of the VM's screen (default ./vm.png)
+  click X Y [right|double]   click in the VM (guest pixels, 1440x900)
+  type TEXT | key COMBO      keyboard input (key: ret, esc, tab, meta-space, ctrl-right ...)
+  find TEXT | click-text TEXT | wait-text SECONDS TEXT    on-screen text (OCR)
+
+Grindow
+  setup                      one-time guest setup: signing keychain, Command Line Tools, spaces.swift
+  install [--run ID | --branch NAME | --pr N]
+                             CI's Grindow.app for that run, branch or PR (default: this
+                             checkout's branch), re-signed in the VM and launched
+  restart                    quit and relaunch the installed app
+  log [MINUTES]              Grindow's log lines from the last MINUTES (default 10)
+  spaces                     Spaces per display and which one is active
+  switch left|right [N]      press Ctrl-arrow N times (macOS's own Space switch), then print spaces
+  swipe DIR[,DIR...] [N] [--interval MS] [--settle S]
+                             fake N three-finger swipes per DIR (up, down, left, right),
+                             MS apart (default 300), into a Debug build; wait S seconds
+                             (default 2), then print spaces. `swipe right,left 3` sends
+                             right x3 then left x3 with no pause between, for reversals
+EOF
+}
+
+# Run a command on the VM host (Lisbon), locally if we're already there.
+on_host() {
+    if [ "$(hostname)" = "$HOST" ]; then bash -lc "$1"
+    else tailscale ssh "bradenbiz@$HOST" "bash -lc $(printf %q "$1")"; fi
+}
+q() { printf '%q ' "$@"; }
+mb() { on_host "$MACBOX $(q "$@")"; }
+vm() { on_host "ssh -o BatchMode=yes -o ConnectTimeout=10 macbox $(printf %q "$1")"; }
+
+latest_run() {  # newest successful CI run id for a branch at a commit
+    gh run list -R "$REPO" --workflow ci.yml --branch "$1" --commit "$2" --status success \
+        --limit 1 --json databaseId --jq '.[0].databaseId // empty'
+}
+
+cmd_install() {
+    local run='' branch='' sha=''
+    case "${1:-}" in
+        --run) run=$2 ;;
+        --branch) branch=$2 ;;
+        --pr) read -r branch sha < <(gh pr view "$2" -R "$REPO" --json headRefName,headRefOid --jq '"\(.headRefName) \(.headRefOid)"') ;;
+        '') branch=$(git rev-parse --abbrev-ref HEAD) ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    if [ -z "$run" ]; then
+        # Only a build of the branch's current head, so results aren't
+        # pinned on the wrong revision while a newer push is still in CI.
+        [ -n "$sha" ] || sha=$(gh api "repos/$REPO/commits/$branch" --jq .sha)
+        run=$(latest_run "$branch" "$sha")
+        [ -n "$run" ] || { echo "no successful CI run for $branch at ${sha:0:7} yet; wait for CI (gh run list -R $REPO --branch $branch), or pass --run ID" >&2; exit 1; }
+    fi
+    echo "CI run $run: $(gh run view "$run" -R "$REPO" --json headBranch,headSha,createdAt --jq '"\(.headBranch) \(.headSha[0:7]) \(.createdAt)"')"
+    local tmp; tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' RETURN
+    gh run download "$run" -R "$REPO" -n Grindow-app -D "$tmp"
+    vm "cat > /tmp/Grindow.app.zip" < "$tmp/Grindow.app.zip"
+    vm "set -e
+osascript -e 'quit app \"Grindow\"' >/dev/null 2>&1 || true
+pkill -x Grindow || true
+mkdir -p ~/$APP_DIR && rm -rf ~/$APP_DIR/Grindow.app
+ditto -x -k /tmp/Grindow.app.zip ~/$APP_DIR/
+security unlock-keychain -p grindow-vm ~/Library/Keychains/grindow-vm.keychain-db
+codesign --force --deep --keychain ~/Library/Keychains/grindow-vm.keychain-db --sign '$IDENTITY' ~/$APP_DIR/Grindow.app
+codesign --verify --strict ~/$APP_DIR/Grindow.app
+codesign -d -r- ~/$APP_DIR/Grindow.app 2>&1 | tail -1
+open ~/$APP_DIR/Grindow.app
+sleep 2; pgrep -x Grindow >/dev/null && echo 'Grindow is running'"
+}
+
+cmd_swipe() {
+    local dirs=${1:?direction: up, down, left or right}; shift
+    local n=1 interval=300 settle=2
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --interval) interval=$2; shift 2 ;;
+            --settle) settle=$2; shift 2 ;;
+            *) n=$1; shift ;;
+        esac
+    done
+    # Compile once per change: `swift script.swift` takes seconds to start,
+    # which would space out a burst.
+    local here; here=$(cd "$(dirname "$0")" && pwd)
+    vm "mkdir -p ~/.grindow-vm && cat > ~/.grindow-vm/swipe.swift.new" < "$here/swipe.swift"
+    vm "cd ~/.grindow-vm && if ! cmp -s swipe.swift.new swipe.swift || [ ! -x swipe ]; then
+mv swipe.swift.new swipe.swift && swiftc -O swipe.swift -o swipe; else rm swipe.swift.new; fi
+./swipe $(q "$dirs" "$n" "$interval") && sleep $(q "$settle")"
+    cmd_spaces
+}
+
+cmd_spaces() {
+    vm 'swift ~/.grindow-vm/spaces.swift'
+}
+
+case "${1:-}" in
+    up|down|status) mb "$1" ;;
+    sh) shift
+        if [ $# -gt 0 ]; then vm "$*"
+        elif [ "$(hostname)" = "$HOST" ]; then ssh -t macbox
+        else tailscale ssh "bradenbiz@$HOST" -t "bash -lc 'ssh -t macbox'"; fi ;;  # a terminal on both hops
+    shot)
+        out=${2:-vm.png}
+        on_host "$MACBOX screenshot /tmp/grindow-vm-shot.png >/dev/null && cat /tmp/grindow-vm-shot.png" > "$out"
+        echo "$out" ;;
+    click|type|key|find|click-text|wait-text|scroll|move) mb "$@" ;;
+    setup)
+        here=$(cd "$(dirname "$0")" && pwd)
+        vm "mkdir -p ~/.grindow-vm && cat > ~/.grindow-vm/spaces.swift" < "$here/spaces.swift"
+        vm "cat > ~/.grindow-vm/setup-guest.sh && sh ~/.grindow-vm/setup-guest.sh" < "$here/setup-guest.sh" ;;
+    install) shift; cmd_install "$@" ;;
+    restart) vm "pkill -x Grindow; sleep 1; open ~/$APP_DIR/Grindow.app; sleep 2; pgrep -x Grindow >/dev/null && echo running" ;;
+    log) vm "/usr/bin/log show --style compact --last ${2:-10}m --predicate 'subsystem == \"com.grindow.app\" OR process == \"Grindow\"' | tail -200" ;;
+    spaces) cmd_spaces ;;
+    switch)
+        dir=${2:?left or right}; n=${3:-1}
+        for _ in $(seq "$n"); do mb key "ctrl-$dir" >/dev/null; sleep 0.8; done
+        cmd_spaces ;;
+    swipe) shift; cmd_swipe "$@" ;;
+    ''|-h|--help|help) usage ;;
+    *) usage >&2; exit 2 ;;
+esac
