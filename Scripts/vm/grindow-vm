@@ -50,23 +50,26 @@ q() { printf '%q ' "$@"; }
 mb() { on_host "$MACBOX $(q "$@")"; }
 vm() { on_host "ssh -o BatchMode=yes -o ConnectTimeout=10 macbox $(printf %q "$1")"; }
 
-latest_run() {  # newest successful CI run id for a branch
-    gh run list -R "$REPO" --workflow ci.yml --branch "$1" --status success \
+latest_run() {  # newest successful CI run id for a branch at a commit
+    gh run list -R "$REPO" --workflow ci.yml --branch "$1" --commit "$2" --status success \
         --limit 1 --json databaseId --jq '.[0].databaseId // empty'
 }
 
 cmd_install() {
-    local run='' branch=''
+    local run='' branch='' sha=''
     case "${1:-}" in
         --run) run=$2 ;;
         --branch) branch=$2 ;;
-        --pr) branch=$(gh pr view "$2" -R "$REPO" --json headRefName --jq .headRefName) ;;
+        --pr) read -r branch sha < <(gh pr view "$2" -R "$REPO" --json headRefName,headRefOid --jq '"\(.headRefName) \(.headRefOid)"') ;;
         '') branch=$(git rev-parse --abbrev-ref HEAD) ;;
         *) usage >&2; exit 2 ;;
     esac
     if [ -z "$run" ]; then
-        run=$(latest_run "$branch")
-        [ -n "$run" ] || { echo "no successful CI run on $branch; push it, or: gh workflow run ci.yml --ref $branch" >&2; exit 1; }
+        # Only a build of the branch's current head, so results aren't
+        # pinned on the wrong revision while a newer push is still in CI.
+        [ -n "$sha" ] || sha=$(gh api "repos/$REPO/commits/$branch" --jq .sha)
+        run=$(latest_run "$branch" "$sha")
+        [ -n "$run" ] || { echo "no successful CI run for $branch at ${sha:0:7} yet; wait for CI (gh run list -R $REPO --branch $branch), or pass --run ID" >&2; exit 1; }
     fi
     echo "CI run $run: $(gh run view "$run" -R "$REPO" --json headBranch,headSha,createdAt --jq '"\(.headBranch) \(.headSha[0:7]) \(.createdAt)"')"
     local tmp; tmp=$(mktemp -d)
@@ -112,7 +115,10 @@ cmd_spaces() {
 
 case "${1:-}" in
     up|down|status) mb "$1" ;;
-    sh) shift; if [ $# -eq 0 ]; then on_host "ssh -t macbox"; else vm "$*"; fi ;;
+    sh) shift
+        if [ $# -gt 0 ]; then vm "$*"
+        elif [ "$(hostname)" = "$HOST" ]; then ssh -t macbox
+        else tailscale ssh "bradenbiz@$HOST" -t "bash -lc 'ssh -t macbox'"; fi ;;  # a terminal on both hops
     shot)
         out=${2:-vm.png}
         on_host "$MACBOX screenshot /tmp/grindow-vm-shot.png >/dev/null && cat /tmp/grindow-vm-shot.png" > "$out"
