@@ -31,3 +31,6 @@ for direction in directions {
         sent += 1
     }
 }
+// Posting is asynchronous. Exiting right after a burst of back-to-back posts
+// sometimes dropped the last one, so give distnoted a moment to deliver.
+usleep(300_000)

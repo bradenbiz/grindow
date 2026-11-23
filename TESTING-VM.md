@@ -78,7 +78,6 @@ Release builds don't contain the listener.
 Scripts/vm/grindow-vm swipe down                      # one swipe, wait 2 s, print spaces
 Scripts/vm/grindow-vm swipe right 3 --interval 120    # a rapid burst of three
 Scripts/vm/grindow-vm swipe right,left 2              # right right left left: a reversal mid-burst
-Scripts/vm/grindow-vm swipe up 1 --settle 0.3; Scripts/vm/grindow-vm shot hud.png   # catch the HUD
 ```
 
 `swipe` copies `Scripts/vm/swipe.swift` into the VM and compiles it when it has
@@ -98,8 +97,21 @@ Scripts/vm/grindow-vm sh 'defaults write com.grindow.app invertSwipes -bool true
 Scripts/vm/grindow-vm restart
 ```
 
-With the default 2x3 grid, Spaces 1 2 3 are the top row and 4 5 6 the bottom row,
-so `down` from 2 goes to 5 and `right` from 3 stops (or wraps to 1).
+Directions are finger directions, before "Invert all swipe directions", which is
+**on by default**: then `up` moves down the grid and `right` moves left. With the
+default 2x3 grid, Spaces 1 2 3 are the top row and 4 5 6 the bottom row, so with
+default settings `up` from 2 goes to 5 and `left` from 3 stops at the edge. The log
+line shows the direction after inversion. Turn inversion off (below) if you'd
+rather have `right` mean right.
+
+The HUD stays up for about a second and the bounce for half a second, and
+`grindow-vm shot` takes most of that, so a screenshot taken after `swipe` returns
+misses them. Take it from Lisbon while the swipe is posted:
+
+```sh
+tailscale ssh bradenbiz@lisbon 'bash -lc "ssh macbox \"~/.grindow-vm/swipe up 1 0\" & sleep 0.25;
+  ~/repos/macbox/macbox screenshot /tmp/hud.png >/dev/null; wait; cat /tmp/hud.png"' > hud.png
+```
 
 ## Gotchas
 

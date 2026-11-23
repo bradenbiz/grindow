@@ -131,6 +131,10 @@ class BounceOverlayController {
             backing: .buffered,
             defer: false
         )
+        // NSWindow created in code defaults to releasing itself on close, which
+        // over-releases it here because overlayWindow still holds it: the next
+        // bounce crashed in the autorelease pool (found in the Lisbon VM).
+        window.isReleasedWhenClosed = false
         window.level = .screenSaver
         window.isOpaque = false
         window.backgroundColor = .clear
