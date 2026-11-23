@@ -5,6 +5,11 @@ Status (2026-10-03): **A and B are implemented in this PR**
 `Tests/SwipeRecognizerTests.swift`). G comes next, after PR #4 lands, because it
 touches the same files. C and E are deferred. D is declined (see below).
 
+Update (2026-11-23): **option H, a macOS VM on Lisbon, is live.** It covers most of
+what E was for (real Space switching through Grindow, Accessibility, the HUD)
+without Braden's Mac or a self-hosted runner. See [TESTING-VM.md](TESTING-VM.md).
+Physical gestures, sleep/wake and macOS 27 still need the real Mac.
+
 ## The problem
 
 Claude works on a Linux machine. Grindow is a macOS-only app built on AppKit,
@@ -143,6 +148,21 @@ descriptions.
 - **Cost:** a few minutes of your time per change that touches hardware.
 - **Effort:** small.
 - **Risk:** none.
+
+### H. A macOS VM on Lisbon (implemented 2026-11-23)
+
+macOS 26 runs under QEMU/KVM in rootless Docker on Lisbon via
+[macbox](https://github.com/0xdaniell/macbox). CI uploads a universal Grindow.app;
+`Scripts/vm/grindow-vm install` puts it in the VM, re-signs it with a stable
+identity (so the one-time Accessibility grant holds), and launches it. Agents
+drive the screen (screenshot, click, type, OCR) and read Space state with
+`grindow-vm spaces`.
+
+- **Covers:** launch, UI, Accessibility, real Space switching and bursts, logs.
+- **Doesn't cover:** trackpad input, sleep/wake, physical displays, macOS 27.
+- **Cost:** free. It holds 6 GB of Lisbon's 12 GB RAM while running.
+- **Caveat:** Apple's license limits macOS to Apple hardware, and Lisbon isn't
+  Apple hardware.
 
 ## Recommendation
 
