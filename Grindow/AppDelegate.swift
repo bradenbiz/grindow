@@ -1,5 +1,9 @@
 import Cocoa
 import SwiftUI
+import os
+
+/// Swipe handling trace, public so `log show` (and `grindow-vm log`) can read it.
+let swipeLog = Logger(subsystem: "com.grindow.app", category: "swipe")
 
 /// The main application delegate that coordinates all Grindow components.
 ///
@@ -167,14 +171,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Swipe Handling
 
     private func handleSwipe(direction: SwipeDirection) {
-        guard settings.isEnabled else { return }
+        guard settings.isEnabled else {
+            swipeLog.log("swipe \(String(describing: direction), privacy: .public): ignored, Grindow is disabled")
+            return
+        }
 
         // Refresh current position from active space
         syncGridToSystem()
         // Repeated swipes route from the pending destination without falsely
         // marking it active in the UI before macOS confirms it.
         let navigationID = spaceManager.navigationSpaceID
-        guard let current = spaceGrid.position(forSpaceID: navigationID) else { return }
+        guard let current = spaceGrid.position(forSpaceID: navigationID) else {
+            swipeLog.log("swipe \(String(describing: direction), privacy: .public): Space \(navigationID) is not in the grid")
+            return
+        }
 
         let target = spaceGrid.targetPosition(
             from: current,
@@ -184,9 +194,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let targetPosition = target {
             // Valid target — switch to it
-            guard let id = spaceGrid.spaceID(at: targetPosition),
-                  spaceManager.switchToSpace(id: id) else { return }
+            guard let id = spaceGrid.spaceID(at: targetPosition) else { return }
+            guard spaceManager.switchToSpace(id: id) else {
+                swipeLog.log("swipe \(String(describing: direction), privacy: .public): \(current.row),\(current.column) -> \(targetPosition.row),\(targetPosition.column) refused: \(self.spaceManager.lastError ?? "", privacy: .public)")
+                return
+            }
+            swipeLog.log("swipe \(String(describing: direction), privacy: .public): \(current.row),\(current.column) -> \(targetPosition.row),\(targetPosition.column)")
         } else {
+            swipeLog.log("swipe \(String(describing: direction), privacy: .public): \(current.row),\(current.column) at the edge (\(self.settings.edgeBehavior.rawValue, privacy: .public))")
             // At the edge
             if settings.edgeBehavior == .bounce && settings.showBounceAnimation {
                 BounceOverlayController.shared.showBounce(direction: direction)

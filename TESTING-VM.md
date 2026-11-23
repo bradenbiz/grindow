@@ -17,9 +17,10 @@ need it: sudo is passwordless and the VM logs in automatically.
 | Accessibility grant and its survival across rebuilds | yes (granted once; CI builds are re-signed with a stable identity) | |
 | Space switching through Grindow (synthetic Dock swipes, bursts, both directions) | yes, verified: grid clicks 2 → 6 and 6 → 1 | |
 | Reading Space state from a script | yes: `grindow-vm spaces` | |
+| Everything after gesture recognition: swipe bursts, reversals, edge behavior, inversion, the swipe HUD | yes, with fake swipes (`grindow-vm swipe`, Debug builds only) | |
 | `swift test`, native C tests | yes (Command Line Tools, Swift 6.3.3), and CI | |
 | Full Xcode build (`xcodebuild`) | CI only. Xcode needs an Apple Account download | |
-| Real trackpad gestures (MultitouchSupport) | no trackpad in a VM, so Grindow shows "Inactive" | recordings (TESTING-OPTIONS C) and replay tests |
+| Real trackpad gestures (MultitouchSupport and the recognizer) | no trackpad in a VM, so Grindow shows "Inactive" | recordings (TESTING-OPTIONS C) and replay tests |
 | Sleep/wake, hot-plug, multiple physical displays | no | yes |
 | macOS 27 | no: macOS for Intel ends at 26 | yes |
 
@@ -40,6 +41,7 @@ Scripts/vm/grindow-vm spaces            # 8B9D…: 1 2 [3] 4 5 6   ([n] is activ
 Scripts/vm/grindow-vm shot vm.png       # screenshot (1440x900), then look at it
 Scripts/vm/grindow-vm click 1144 14     # Grindow's menu bar icon
 Scripts/vm/grindow-vm switch right 2    # macOS's own Ctrl-→ switch, for comparison
+Scripts/vm/grindow-vm swipe right 2     # two fake three-finger swipes, then spaces
 Scripts/vm/grindow-vm log 10            # Grindow's log lines, last 10 minutes
 Scripts/vm/grindow-vm sh 'pgrep -l Grindow'
 
@@ -60,6 +62,44 @@ Scripts/vm/grindow-vm shot grid.png               # find the destination cell
 Scripts/vm/grindow-vm click <x> <y>               # click it
 sleep 3; Scripts/vm/grindow-vm spaces             # did the right Space become active?
 ```
+
+## Fake swipes
+
+The VM has no trackpad, so Debug builds of Grindow (CI's artifact is one) accept
+fake swipes instead. `GestureInterceptor` listens for the distributed notification
+`com.grindow.debug.swipe` with `userInfo["direction"]` set to `up`, `down`, `left`
+or `right`, and treats each one as a three-finger swipe the recognizer just saw.
+Everything after that is the real code path: "Invert swipe direction", grid
+navigation, edge behavior, bursts and the swipe HUD. Only MultitouchSupport and
+`ThreeFingerSwipeRecognizer` are skipped; the recognizer has its own unit tests.
+Release builds don't contain the listener.
+
+```sh
+Scripts/vm/grindow-vm swipe down                      # one swipe, wait 2 s, print spaces
+Scripts/vm/grindow-vm swipe right 3 --interval 120    # a rapid burst of three
+Scripts/vm/grindow-vm swipe right,left 2              # right right left left: a reversal mid-burst
+Scripts/vm/grindow-vm swipe up 1 --settle 0.3; Scripts/vm/grindow-vm shot hud.png   # catch the HUD
+```
+
+`swipe` copies `Scripts/vm/swipe.swift` into the VM and compiles it when it has
+changed, so a burst isn't slowed by `swift` startup. `--interval` is the gap
+between swipes in milliseconds (default 300); `--settle` is how long to wait
+before printing spaces (default 2 seconds).
+
+`grindow-vm log 1` shows what Grindow did with each swipe, real or fake, under the
+`swipe` category: `debug swipe right received`, then the grid move
+(`swipe right: 1,2 -> 0,2`), `at the edge (stop)`, or why it was refused.
+
+Settings can be changed from the command line; restart Grindow after writing them:
+
+```sh
+Scripts/vm/grindow-vm sh 'defaults write com.grindow.app edgeBehavior wrap'   # stop | wrap | bounce
+Scripts/vm/grindow-vm sh 'defaults write com.grindow.app invertSwipes -bool true'
+Scripts/vm/grindow-vm restart
+```
+
+With the default 2x3 grid, Spaces 1 2 3 are the top row and 4 5 6 the bottom row,
+so `down` from 2 goes to 5 and `right` from 3 stops (or wraps to 1).
 
 ## Gotchas
 

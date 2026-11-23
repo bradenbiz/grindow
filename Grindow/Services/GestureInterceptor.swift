@@ -186,8 +186,7 @@ class GestureInterceptor: NSObject, ObservableObject {
             // behavior would hold or coalesce notifications while inactive.
             suspensionBehavior: .deliverImmediately
         )
-        // NSLog, not print, so `grindow-vm log` shows these lines.
-        NSLog("Grindow: debug swipe injection listening for %@", Self.debugSwipeNotification.rawValue)
+        swipeLog.log("debug swipe injection listening for \(Self.debugSwipeNotification.rawValue, privacy: .public)")
     }
 
     @objc private func debugSwipeReceived(_ note: Notification) {
@@ -201,10 +200,10 @@ class GestureInterceptor: NSObject, ObservableObject {
         default: direction = nil
         }
         guard let direction else {
-            NSLog("Grindow: debug swipe ignored, bad direction %@", raw ?? "nil")
+            swipeLog.log("debug swipe ignored, bad direction \(raw ?? "nil", privacy: .public)")
             return
         }
-        NSLog("Grindow: debug swipe %@", "\(direction)")
+        swipeLog.log("debug swipe \(String(describing: direction), privacy: .public) received")
         DispatchQueue.main.async {
             self.deliver(.began)
             self.deliver(.swipe(direction))
