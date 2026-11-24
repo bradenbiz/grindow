@@ -11,6 +11,6 @@ let package = Package(
             "Info.plist", "Grindow.entitlements", "Grindow-Bridging-Header.h",
             "Services/SpaceManager.swift", "Services/GestureInterceptor.swift", "Services/AccessibilityHelper.swift"
         ], sources: ["Models", "Services/SpaceSwitchCoordinator.swift"]),
-        .testTarget(name: "GrindowCoreTests", dependencies: ["GrindowCore"], path: "Tests", exclude: ["Native"])
+        .testTarget(name: "GrindowCoreTests", dependencies: ["GrindowCore"], path: "Tests", exclude: ["Native", "Fixtures"])
     ]
 )
