@@ -70,7 +70,7 @@ fake swipes instead. `GestureInterceptor` listens for the distributed notificati
 `com.grindow.debug.swipe` with `userInfo["direction"]` set to `up`, `down`, `left`
 or `right`, and treats each one as a three-finger swipe the recognizer just saw.
 Everything after that is the real code path: "Invert swipe direction", grid
-navigation, edge behavior, bursts and the swipe HUD. Only MultitouchSupport and
+navigation, edge behavior, bursts and the swipe HUD. Only the gesture event tap and
 `ThreeFingerSwipeRecognizer` are skipped; the recognizer has its own unit tests.
 Release builds don't contain the listener.
 
