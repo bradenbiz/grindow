@@ -97,6 +97,19 @@ Scripts/vm/grindow-vm sh 'defaults write com.grindow.app invertSwipes -bool true
 Scripts/vm/grindow-vm restart
 ```
 
+Grindow skips a swipe when macOS also uses three-finger swipes on that axis, since
+both would switch Spaces (`NativeTrackpadGestures`; the log says `skipped, macOS
+also uses three-finger swipes on this axis`). macOS's default is three fingers for
+both axes, so `setup-guest.sh` turns them off in the VM. To test the skip, or on a
+VM set up before that:
+
+```sh
+Scripts/vm/grindow-vm sh 'defaults write com.apple.AppleMultitouchTrackpad TrackpadThreeFingerHorizSwipeGesture -int 0'   # 2 = macOS claims it
+Scripts/vm/grindow-vm sh 'defaults write com.apple.AppleMultitouchTrackpad TrackpadThreeFingerVertSwipeGesture -int 0'
+```
+
+Grindow rereads these on every swipe, so no restart is needed.
+
 Directions are finger directions, before "Invert all swipe directions", which is
 **on by default**: then `up` moves down the grid and `right` moves left. With the
 default 2x3 grid, Spaces 1 2 3 are the top row and 4 5 6 the bottom row, so with

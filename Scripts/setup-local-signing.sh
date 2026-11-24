@@ -1,13 +1,21 @@
 #!/bin/sh
 # Run once on this Mac. The private key stays in the user's login keychain.
 set -eu
+cd "$(dirname "$0")/.."
 umask 077
 signing_name='Grindow Local Development'
 keychain=$(security default-keychain -d user | tr -d '"' | sed 's/^ *//')
 
+# Point Xcode builds at the stable identity. Git-ignored; see Config/Signing.xcconfig.
+write_xcode_override() {
+    printf 'CODE_SIGN_IDENTITY = %s\n' "$signing_name" > Config/Signing.local.xcconfig
+    printf '%s\n' 'Wrote Config/Signing.local.xcconfig for Xcode builds.'
+}
+
 if security find-certificate -c "$signing_name" "$keychain" >/dev/null 2>&1; then
     if security find-identity -v -p codesigning "$keychain" | grep -F "\"$signing_name\"" >/dev/null; then
         printf '%s\n' 'Grindow signing identity already exists; keeping it.'
+        write_xcode_override
         exit 0
     fi
     printf '%s\n' 'A Grindow certificate exists but is not a valid signing identity. Repair it in Keychain Access; do not replace it with a new certificate.' >&2
@@ -42,4 +50,5 @@ security import "$signing_tmp/identity.p12" -k "$keychain" \
 # Trust only this certificate for code signing, in the user's trust settings.
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$signing_tmp/certificate.pem"
 security find-identity -v -p codesigning "$keychain" | grep -F "\"$signing_name\""
+write_xcode_override
 printf '%s\n' 'Local signing identity installed. Keep this certificate and private key for future builds.'

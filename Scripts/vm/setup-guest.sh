@@ -57,6 +57,10 @@ echo "toolchain: $(swift --version 2>&1 | head -1)"
 
 # Spaces stay in the order the test makes them, and Ctrl-1..9 jump to desktops.
 defaults write com.apple.dock mru-spaces -bool false
+# macOS's three-finger swipes off, as Grindow asks users to do; otherwise it
+# skips every swipe (NativeTrackpadGestures) to avoid a double switch.
+defaults write com.apple.AppleMultitouchTrackpad TrackpadThreeFingerHorizSwipeGesture -int 0
+defaults write com.apple.AppleMultitouchTrackpad TrackpadThreeFingerVertSwipeGesture -int 0
 killall Dock 2>/dev/null || true
 mkdir -p "$HOME/.grindow-vm"
 echo 'guest ready'
