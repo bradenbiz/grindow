@@ -1,7 +1,7 @@
 import Foundation
 
-/// One finger in contact with the trackpad, in MultitouchSupport's normalized
-/// [0,1] pad coordinates: x=0 is left, y=0 is nearest the user.
+/// One finger in contact with the trackpad, in normalized [0,1] pad
+/// coordinates (`NSTouch.normalizedPosition`): x=0 is left, y=0 is nearest the user.
 struct TouchPoint: Equatable {
     let id: Int32
     let x: Float
@@ -9,7 +9,7 @@ struct TouchPoint: Equatable {
 }
 
 /// Turns per-frame finger contacts into at most one swipe per three-finger
-/// gesture. Kept free of MultitouchSupport so it can be driven by scripted
+/// gesture. Kept free of AppKit so it can be driven by scripted
 /// frames in tests; `GestureInterceptor` feeds it live frames.
 struct ThreeFingerSwipeRecognizer {
     enum Event: Equatable {

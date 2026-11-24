@@ -1,86 +1,24 @@
 import Cocoa
 import CoreGraphics
 
-// MARK: - Private MultitouchSupport.framework bindings
+// MARK: - Event tap callback (cannot capture)
 
-private typealias MTDeviceRef = UnsafeMutableRawPointer
-
-private struct MTReadout {
-    var posX: Float
-    var posY: Float
-    var velX: Float
-    var velY: Float
-}
-
-private struct MTTouch {
-    var frame: Int32
-    var _pad0: Int32   // explicit pad to align `timestamp` (Double) at offset 8
-    var timestamp: Double
-    var identifier: Int32
-    var state: Int32   // 1=not touching, 4=touching, 6/7=lifted
-    var fingerIdx: Int32
-    var handIdx: Int32
-    var normalized: MTReadout       // 16 bytes, components in [0,1]
-    var size: Float
-    var reserved1: Int32
-    var angle: Float
-    var majorAxis: Float
-    var minorAxis: Float
-    var absolute: MTReadout         // 16 bytes, in display points
-    var reserved2: Int32
-    var reserved3: Int32
-    var zDensity: Float
-}
-
-// Callback takes a raw pointer because @convention(c) requires Obj-C-representable
-// parameters, and `UnsafeMutablePointer<MTTouch>` isn't. We rebind inside.
-private typealias MTContactFrameCallback = @convention(c) (
-    Int32,
-    UnsafeMutableRawPointer?,
-    Int32,
-    Double,
-    Int32
-) -> Int32
-
-@_silgen_name("MTDeviceCreateDefault")
-private func MTDeviceCreateDefault() -> MTDeviceRef?
-
-@_silgen_name("MTRegisterContactFrameCallback")
-private func MTRegisterContactFrameCallback(_ device: MTDeviceRef, _ callback: MTContactFrameCallback)
-
-@_silgen_name("MTUnregisterContactFrameCallback")
-private func MTUnregisterContactFrameCallback(_ device: MTDeviceRef, _ callback: MTContactFrameCallback)
-
-@_silgen_name("MTDeviceStart")
-private func MTDeviceStart(_ device: MTDeviceRef, _ flags: Int32) -> Int32
-
-@_silgen_name("MTDeviceStop")
-private func MTDeviceStop(_ device: MTDeviceRef) -> Int32
-
-@_silgen_name("MTDeviceRelease")
-private func MTDeviceRelease(_ device: MTDeviceRef)
-
-// MARK: - C callback (cannot capture)
-
-private let multitouchCallback: MTContactFrameCallback = { _, rawPtr, nTouches, timestamp, frame in
-    guard nTouches > 0, let rawPtr else {
-        DispatchQueue.main.async { GestureInterceptor.shared.handleTouchFrame(touches: [], timestamp: timestamp, frame: frame) }
-        return 0
+private let gestureTapCallback: CGEventTapCallBack = { _, type, event, _ in
+    switch type {
+    case .tapDisabledByTimeout, .tapDisabledByUserInput:
+        DispatchQueue.main.async { GestureInterceptor.shared.reenableTap() }
+    default:
+        GestureInterceptor.shared.handleGestureEvent(event)
     }
-    let typedPtr = rawPtr.assumingMemoryBound(to: MTTouch.self)
-    let buffer = UnsafeBufferPointer(start: typedPtr, count: Int(nTouches))
-    let touches = Array(buffer)
-    DispatchQueue.main.async {
-        GestureInterceptor.shared.handleTouchFrame(touches: touches, timestamp: timestamp, frame: frame)
-    }
-    return 0
+    return Unmanaged.passUnretained(event)
 }
 
 // MARK: - GestureInterceptor
 
-/// Intercepts three-finger trackpad swipe gestures using the private
-/// `MultitouchSupport.framework`. Reads raw finger positions before macOS's
-/// gesture recognizer routes vertical swipes to Mission Control / Exposé.
+/// Detects three-finger trackpad swipes with a listen-only `CGEventTap` on
+/// gesture events, reading each finger from `NSEvent.allTouches()`. Public API
+/// only (no MultitouchSupport); needs the Accessibility grant Grindow already
+/// requires. The tap only listens, so every app still receives the touches.
 ///
 /// Note: this only *detects* swipes — macOS still acts on its built-in
 /// three-finger gestures unless the user disables them in
@@ -94,62 +32,92 @@ class GestureInterceptor: NSObject, ObservableObject {
     var onGestureBegan: (() -> Void)?
     var onSwipe: ((SwipeDirection) -> Void)?
 
-    // MARK: - State (main queue only)
+    // MARK: - State (main thread only; the tap runs on the main run loop)
 
-    private var device: MTDeviceRef?
+    private var tap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
     private var recognizer = ThreeFingerSwipeRecognizer()
+    private var touchIDs = StableTouchIDs<NSObject>()
+    private let ownPID = Int64(getpid())
 
     private override init() {}
 
     // MARK: - Start / Stop
 
     func start() {
-        guard device == nil else { return }
+        guard tap == nil else { return }
 
-        let size = MemoryLayout<MTTouch>.size
-        guard size == 96 else {
-            print("Grindow: MTTouch struct size = \(size), expected 96. Aborting — layout mismatch would corrupt finger reads.")
+        let mask = CGEventMask(1) << CGEventMask(NSEvent.EventType.gesture.rawValue)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: gestureTapCallback,
+            userInfo: nil
+        ) else {
+            print("Grindow: could not create the gesture event tap (Accessibility not granted?)")
             return
         }
-
-        guard let dev = MTDeviceCreateDefault() else {
-            print("Grindow: MTDeviceCreateDefault returned nil — no multitouch device available.")
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            print("Grindow: could not create a run loop source for the gesture tap")
             return
         }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
 
-        MTRegisterContactFrameCallback(dev, multitouchCallback)
-        let result = MTDeviceStart(dev, 0)
-        guard result == 0 else {
-            print("Grindow: MTDeviceStart failed (\(result))")
-            MTUnregisterContactFrameCallback(dev, multitouchCallback)
-            MTDeviceRelease(dev)
-            return
-        }
-
-        device = dev
+        self.tap = tap
+        runLoopSource = source
         isActive = true
-        print("Grindow: Gesture interceptor started (MultitouchSupport)")
+        print("Grindow: Gesture interceptor started (event tap)")
     }
 
     func stop() {
-        guard let dev = device else { return }
-        _ = MTDeviceStop(dev)
-        MTUnregisterContactFrameCallback(dev, multitouchCallback)
-        MTDeviceRelease(dev)
-        device = nil
+        guard let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        }
+        CFMachPortInvalidate(tap)
+        self.tap = nil
+        runLoopSource = nil
         recognizer.reset()
+        touchIDs.reset()
         isActive = false
         print("Grindow: Gesture interceptor stopped")
     }
 
-    // MARK: - Frame handling
+    /// macOS disables a tap whose callback runs too long; turn it back on.
+    fileprivate func reenableTap() {
+        guard let tap else { return }
+        recognizer.reset()
+        touchIDs.reset()
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
 
-    fileprivate func handleTouchFrame(touches: [MTTouch], timestamp: Double, frame: Int32) {
-        guard device != nil else { return }
-        let contacts = touches.filter { $0.state == 4 }.map {
-            TouchPoint(id: $0.identifier, x: $0.normalized.posX, y: $0.normalized.posY)
+    // MARK: - Event handling
+
+    fileprivate func handleGestureEvent(_ cgEvent: CGEvent) {
+        guard tap != nil else { return }
+        // Grindow posts synthetic Dock-swipe gestures to switch Spaces. They carry
+        // no fingers and would reset the recognizer mid-swipe, so skip our own.
+        guard cgEvent.getIntegerValueField(.eventSourceUnixProcessID) != ownPID else { return }
+
+        let touches: [NSTouch] = autoreleasepool {
+            guard let event = NSEvent(cgEvent: cgEvent) else { return [] }
+            return event.allTouches().filter { $0.phase.contains(.touching) }
         }
-        if let event = recognizer.process(contacts) { deliver(event) }
+        let ids = touchIDs.ids(for: touches.map { $0.identity as! NSObject })
+        let contacts = zip(ids, touches).map { id, touch in
+            let point = touch.normalizedPosition
+            return TouchPoint(id: id, x: Float(point.x), y: Float(point.y))
+        }
+
+        // Callbacks may post a burst of gestures; keep that out of the tap callback.
+        if let event = recognizer.process(contacts) {
+            DispatchQueue.main.async { self.deliver(event) }
+        }
     }
 
     /// Hands a recognizer event to the app. Live frames and the debug
@@ -173,7 +141,7 @@ class GestureInterceptor: NSObject, ObservableObject {
     /// "down", "left" or "right" (Scripts/vm/swipe.swift does this). Each one
     /// acts like a three-finger swipe the recognizer just saw: `.began`, then
     /// `.swipe`, before inversion. Works whether or not a trackpad was found,
-    /// so it bypasses only MultitouchSupport and the recognizer.
+    /// so it bypasses only the event tap and the recognizer.
     static let debugSwipeNotification = Notification.Name("com.grindow.debug.swipe")
 
     func startDebugSwipeInjection() {
